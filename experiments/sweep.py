@@ -39,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TRAIN_SCRIPT = REPO_ROOT / "train_gpt.py"
 RESULTS_FILE = REPO_ROOT / "experiments" / "results.jsonl"
 LOGS_DIR = REPO_ROOT / "experiments" / "logs"
+BRANCH = "claude/optimize-train-baseline-M8rn2"
 
 # ---------------------------------------------------------------------------
 # Hardware presets
@@ -180,6 +181,84 @@ for cat_exps in CATEGORY_MAP.values():
 
 
 # ---------------------------------------------------------------------------
+# Git sync — push results back to the shared branch
+# ---------------------------------------------------------------------------
+
+def git_sync_pull() -> bool:
+    """Pull latest results from remote before starting. Returns True on success."""
+    try:
+        # Fetch + merge results from other machines
+        subprocess.run(
+            ["git", "fetch", "origin", BRANCH],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+        )
+        # Only merge the results file and logs to avoid conflicts with code changes
+        subprocess.run(
+            ["git", "merge", f"origin/{BRANCH}", "--no-edit", "-X", "ours"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+        )
+        print("[git-sync] Pulled latest results from remote.")
+        return True
+    except Exception as e:
+        print(f"[git-sync] Pull failed (non-fatal): {e}")
+        return False
+
+
+def git_sync_push(experiment_id: str, hardware: str) -> bool:
+    """Commit and push results after an experiment completes."""
+    try:
+        # Stage results file and the experiment log
+        files_to_add = [str(RESULTS_FILE)]
+        log_file = LOGS_DIR / f"{experiment_id}.log"
+        if log_file.exists():
+            files_to_add.append(str(log_file))
+
+        subprocess.run(
+            ["git", "add"] + files_to_add,
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15,
+        )
+
+        # Check if there's anything to commit
+        status = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(REPO_ROOT), capture_output=True, timeout=10,
+        )
+        if status.returncode == 0:
+            # Nothing staged
+            return True
+
+        subprocess.run(
+            ["git", "commit", "-m", f"results: {experiment_id} on {hardware}"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15,
+        )
+
+        # Push with retry (exponential backoff)
+        for attempt, delay in enumerate([0, 2, 4, 8], 1):
+            if delay > 0:
+                time.sleep(delay)
+            result = subprocess.run(
+                ["git", "push", "-u", "origin", BRANCH],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                print(f"[git-sync] Pushed {experiment_id} results (attempt {attempt}).")
+                return True
+            # If push fails due to remote changes, pull and retry
+            if "rejected" in result.stderr or "fetch first" in result.stderr:
+                subprocess.run(
+                    ["git", "pull", "--rebase", "origin", BRANCH],
+                    cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+                )
+
+        print(f"[git-sync] Push failed after 4 attempts. Results saved locally.")
+        return False
+
+    except Exception as e:
+        print(f"[git-sync] Sync failed (non-fatal): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
 
@@ -242,6 +321,7 @@ def run_experiment(
     hardware: str,
     dry_run: bool = False,
     seed: int | None = None,
+    sync: bool = True,
 ) -> dict | None:
     """Run a single experiment and return parsed results."""
     preset = HARDWARE_PRESETS[hardware]
@@ -318,6 +398,10 @@ def run_experiment(
         with open(RESULTS_FILE, "a") as f:
             f.write(json.dumps(result) + "\n")
 
+        # Auto-sync results to git
+        if sync:
+            git_sync_push(experiment_id, hardware)
+
         return result
 
     except subprocess.TimeoutExpired:
@@ -387,6 +471,8 @@ def main():
                         help="Override seed for all experiments")
     parser.add_argument("--seeds", type=str, default=None,
                         help="Comma-separated seeds for multi-seed validation (e.g. 1337,42,7)")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="Disable auto git commit+push after each experiment")
     args = parser.parse_args()
 
     if args.leaderboard:
@@ -424,6 +510,19 @@ def main():
         print_leaderboard()
         return
 
+    # Pull latest results from remote before starting
+    sync = not args.no_sync
+    if sync and not args.dry_run:
+        git_sync_pull()
+        # Re-check completed after pull (other machine may have finished some)
+        if args.resume:
+            completed = load_completed(RESULTS_FILE)
+            experiments = {k: v for k, v in experiments.items() if k not in completed}
+            if not experiments:
+                print("All experiments already completed (after pulling remote results).")
+                print_leaderboard()
+                return
+
     print(f"Queued {len(experiments)} experiments on {args.hardware}")
     if args.dry_run:
         print("DRY RUN mode — no experiments will be executed\n")
@@ -441,7 +540,7 @@ def main():
             completed_count += 1
             run_id = exp_id if seed is None else f"{exp_id}_seed{seed}"
             print(f"\n[{completed_count}/{total}] Running {run_id}...")
-            run_experiment(run_id, env_vars, args.hardware, dry_run=args.dry_run, seed=seed)
+            run_experiment(run_id, env_vars, args.hardware, dry_run=args.dry_run, seed=seed, sync=sync)
 
     if not args.dry_run:
         print_leaderboard()

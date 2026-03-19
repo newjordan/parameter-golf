@@ -1,0 +1,4 @@
+# Keep results.jsonl tracked (the central results database)
+# Keep experiment logs tracked (for audit trail)
+# Ignore PID tracking files
+logs/active_pids.txt
