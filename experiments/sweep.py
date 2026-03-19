@@ -45,13 +45,23 @@ BRANCH = "claude/optimize-train-baseline-M8rn2"
 # Hardware presets
 # ---------------------------------------------------------------------------
 
+def _gpu_count() -> int:
+    """Detect available CUDA GPUs (falls back to 8 for the official config)."""
+    try:
+        import torch
+        n = torch.cuda.device_count()
+        return n if n > 0 else 8
+    except Exception:
+        return 8
+
+
 HARDWARE_PRESETS = {
     "h100": {
-        "launch_cmd": ["torchrun", "--nproc_per_node=8"],
+        "launch_cmd": ["torchrun", f"--nproc_per_node={_gpu_count()}"],
         "env_overrides": {
             "MAX_WALLCLOCK_SECONDS": "600",
         },
-        "description": "8×H100 (official leaderboard config)",
+        "description": f"{_gpu_count()}×H100 (official leaderboard config)",
     },
     "spark": {
         "launch_cmd": ["python"],
