@@ -1,0 +1,13 @@
+{
+  "author": "newjordan",
+  "name": "Run01 Default Config",
+  "blurb": "Default parameters, 8xH100, 1203 steps in 600s (~499ms/step). Baseline comparison run before optimization.",
+  "date": "2026-03-19T00:00:00Z",
+  "val_loss": 2.27034992,
+  "val_bpb": 1.34462911,
+  "bytes_total": 13142805,
+  "bytes_code": 47642,
+  "steps_completed": 1203,
+  "step_avg_ms": 499.12,
+  "peak_memory_mib": 10239
+}
