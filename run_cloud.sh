@@ -133,6 +133,34 @@ case $MODE in
         export MLP_MULT=2
         export NUM_LAYERS=9
         ;;
+    sprint)
+        export RUN_ID="sprint_ccf_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+        export FRACTAL=1
+        export NUM_UNIQUE_LAYERS=3
+        export NUM_LOOPS=3
+        export USE_GRAVITY=0
+        export USE_ATTNRES=0
+        export BREATH_PATTERN="cheap,cheap,full"
+        export MODEL_DIM=864
+        export NUM_HEADS=8
+        export NUM_KV_HEADS=4
+        export MLP_MULT=2
+        export NUM_LAYERS=9
+        ;;
+    sprint4)
+        export RUN_ID="sprint4_cccf_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+        export FRACTAL=1
+        export NUM_UNIQUE_LAYERS=3
+        export NUM_LOOPS=4
+        export USE_GRAVITY=0
+        export USE_ATTNRES=0
+        export BREATH_PATTERN="cheap,cheap,cheap,full"
+        export MODEL_DIM=864
+        export NUM_HEADS=8
+        export NUM_KV_HEADS=4
+        export MLP_MULT=2
+        export NUM_LAYERS=9
+        ;;
     *)
         echo "Unknown mode: $MODE"
         echo "Options: baseline, fractal, fractal_only, fractal_no_gravity"
