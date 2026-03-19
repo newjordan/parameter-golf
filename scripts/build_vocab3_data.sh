@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/frosty40/parameter-golf-lab"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/frosty40/jupyterlab/.venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./data}"
 TOKENIZER_CONFIG="${TOKENIZER_CONFIG:-./data/tokenizer_specs_vocab3.json}"
 TOKENIZER_TRAIN_DOCS="${TOKENIZER_TRAIN_DOCS:-5000000}"
