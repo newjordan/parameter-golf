@@ -86,6 +86,13 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # Fractal mode: weight-shared layers with loops, gravity, and AttnRes.
+    fractal = bool(int(os.environ.get("FRACTAL", "0")))
+    num_unique_layers = int(os.environ.get("NUM_UNIQUE_LAYERS", 3))
+    num_loops = int(os.environ.get("NUM_LOOPS", 3))
+    use_gravity = bool(int(os.environ.get("USE_GRAVITY", "1")))
+    use_attnres = bool(int(os.environ.get("USE_ATTNRES", "1")))
+
 # -----------------------------
 # MUON OPTIMIZER 
 # -----------------------------
@@ -725,6 +732,141 @@ class GPT(nn.Module):
 
 
 # -----------------------------
+# ATTENTION RESIDUALS (AttnRes)
+# From Moonshot: arxiv:2603.15031
+# -----------------------------
+
+class AttnResModule(nn.Module):
+    """Single learned query attending over previous loop outputs."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(dim) * 0.01)
+
+    def forward(self, loop_outputs: list[Tensor]) -> Tensor:
+        if len(loop_outputs) == 1:
+            return loop_outputs[0]
+        V = torch.stack(loop_outputs, dim=0)  # [N, B, T, D]
+        K = F.rms_norm(V, (V.size(-1),))
+        logits = torch.einsum("d, n b t d -> n b t", self.query, K)
+        weights = logits.softmax(dim=0)
+        return torch.einsum("n b t, n b t d -> b t d", weights, V)
+
+
+# -----------------------------
+# FRACTAL GPT (weight-shared layers + gravity + AttnRes)
+# -----------------------------
+
+class FractalGPT(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        num_unique_layers: int,
+        num_loops: int,
+        model_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: int,
+        tie_embeddings: bool,
+        tied_embed_init_std: float,
+        logit_softcap: float,
+        rope_base: float,
+        qk_gain_init: float,
+        use_gravity: bool = True,
+        use_attnres: bool = True,
+    ):
+        super().__init__()
+        if logit_softcap <= 0.0:
+            raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
+        self.num_unique_layers = num_unique_layers
+        self.num_loops = num_loops
+        self.tie_embeddings = tie_embeddings
+        self.tied_embed_init_std = tied_embed_init_std
+        self.logit_softcap = logit_softcap
+        self.use_gravity = use_gravity
+        self.use_attnres = use_attnres
+
+        self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        self.blocks = nn.ModuleList([
+            Block(model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            for _ in range(num_unique_layers)
+        ])
+        self.final_norm = RMSNorm()
+        self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
+        if self.lm_head is not None:
+            self.lm_head._zero_init = True
+
+        # Loop position embeddings
+        self.loop_pos = nn.Parameter(torch.randn(num_loops, model_dim) * 0.01)
+
+        # Gravity: learned auxiliary loss weights (in logit space, passed through softplus)
+        if use_gravity:
+            init_vals = [-2.0] * (num_loops - 1) + [0.0]
+            self.gravity_logits = nn.Parameter(torch.tensor(init_vals, dtype=torch.float32))
+
+        # AttnRes: one per effective layer
+        if use_attnres:
+            total_effective = num_unique_layers * num_loops
+            self.attnres_modules = nn.ModuleList([AttnResModule(model_dim) for _ in range(total_effective)])
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        if self.tie_embeddings:
+            nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
+        for module in self.modules():
+            if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
+                nn.init.zeros_(module.weight)
+
+    def _compute_logits(self, x: Tensor) -> Tensor:
+        x = self.final_norm(x).reshape(-1, x.size(-1))
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            logits_proj = self.lm_head(x)
+        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
+    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        x = self.tok_emb(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
+
+        loop_outputs: list[Tensor] = [x]
+        gravity_losses: list[Tensor] = []
+        targets = target_ids.reshape(-1)
+        flat_idx = 0
+
+        for loop in range(self.num_loops):
+            x = x + self.loop_pos[loop].to(dtype=x.dtype)
+
+            for layer_idx in range(self.num_unique_layers):
+                if self.use_attnres and len(loop_outputs) > 1:
+                    x = self.attnres_modules[flat_idx](loop_outputs + [x])
+                x = self.blocks[layer_idx](x, x0)
+                flat_idx += 1
+
+            loop_outputs.append(x)
+
+            # Gravity: auxiliary loss at loop boundary
+            if self.use_gravity and loop < self.num_loops - 1:
+                aux_logits = self._compute_logits(x)
+                aux_loss = F.cross_entropy(aux_logits.float(), targets, reduction="mean")
+                weight = F.softplus(self.gravity_logits[loop])
+                gravity_losses.append(weight * aux_loss)
+
+        # Final loss
+        final_logits = self._compute_logits(x)
+        final_loss = F.cross_entropy(final_logits.float(), targets, reduction="mean")
+
+        if self.use_gravity and gravity_losses:
+            final_weight = F.softplus(self.gravity_logits[-1])
+            total_loss = sum(gravity_losses) + final_weight * final_loss
+            total_weight = sum(F.softplus(self.gravity_logits[i]) for i in range(self.num_loops))
+            return total_loss / total_weight
+
+        return final_loss
+
+
+# -----------------------------
 # TRAINING
 # -----------------------------
 
@@ -823,19 +965,39 @@ def main() -> None:
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
 
-    base_model = GPT(
-        vocab_size=args.vocab_size,
-        num_layers=args.num_layers,
-        model_dim=args.model_dim,
-        num_heads=args.num_heads,
-        num_kv_heads=args.num_kv_heads,
-        mlp_mult=args.mlp_mult,
-        tie_embeddings=args.tie_embeddings,
-        tied_embed_init_std=args.tied_embed_init_std,
-        logit_softcap=args.logit_softcap,
-        rope_base=args.rope_base,
-        qk_gain_init=args.qk_gain_init,
-    ).to(device).bfloat16()
+    if args.fractal:
+        log0(f"fractal_mode:on unique_layers:{args.num_unique_layers} loops:{args.num_loops} "
+             f"gravity:{args.use_gravity} attnres:{args.use_attnres}")
+        base_model = FractalGPT(
+            vocab_size=args.vocab_size,
+            num_unique_layers=args.num_unique_layers,
+            num_loops=args.num_loops,
+            model_dim=args.model_dim,
+            num_heads=args.num_heads,
+            num_kv_heads=args.num_kv_heads,
+            mlp_mult=args.mlp_mult,
+            tie_embeddings=args.tie_embeddings,
+            tied_embed_init_std=args.tied_embed_init_std,
+            logit_softcap=args.logit_softcap,
+            rope_base=args.rope_base,
+            qk_gain_init=args.qk_gain_init,
+            use_gravity=args.use_gravity,
+            use_attnres=args.use_attnres,
+        ).to(device).bfloat16()
+    else:
+        base_model = GPT(
+            vocab_size=args.vocab_size,
+            num_layers=args.num_layers,
+            model_dim=args.model_dim,
+            num_heads=args.num_heads,
+            num_kv_heads=args.num_kv_heads,
+            mlp_mult=args.mlp_mult,
+            tie_embeddings=args.tie_embeddings,
+            tied_embed_init_std=args.tied_embed_init_std,
+            logit_softcap=args.logit_softcap,
+            rope_base=args.rope_base,
+            qk_gain_init=args.qk_gain_init,
+        ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
             module.float()
@@ -859,8 +1021,17 @@ def main() -> None:
         for name, p in block_named_params
         if p.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
-    if base_model.skip_weights.numel() > 0:
+    if hasattr(base_model, 'skip_weights') and base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    # Fractal-specific scalar params
+    if hasattr(base_model, 'loop_pos'):
+        scalar_params.append(base_model.loop_pos)
+    if hasattr(base_model, 'gravity_logits'):
+        scalar_params.append(base_model.gravity_logits)
+    # AttnRes query vectors are small — treat as scalar/Adam
+    if hasattr(base_model, 'attnres_modules'):
+        for arm in base_model.attnres_modules:
+            scalar_params.append(arm.query)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
