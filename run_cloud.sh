@@ -161,9 +161,19 @@ case $MODE in
         export MLP_MULT=2
         export NUM_LAYERS=9
         ;;
+    attnres)
+        export RUN_ID="attnres_pure_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+        export ATTNRES_PURE=1
+        export FRACTAL=0
+        export NUM_LAYERS=9
+        export MODEL_DIM=512
+        export NUM_HEADS=8
+        export NUM_KV_HEADS=4
+        export MLP_MULT=2
+        ;;
     *)
         echo "Unknown mode: $MODE"
-        echo "Options: baseline, fractal, fractal_only, fractal_no_gravity"
+        echo "Options: baseline, fractal, fractal_only, fractal_no_gravity, breathing, breathing_no_gravity, sprint, sprint4, attnres"
         exit 1
         ;;
 esac

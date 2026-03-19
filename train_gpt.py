@@ -86,6 +86,8 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # AttnRes-only mode: standard 9-layer with AttnRes replacing U-Net skips.
+    attnres_pure = bool(int(os.environ.get("ATTNRES_PURE", "0")))
     # Fractal mode: weight-shared layers with loops, gravity, and AttnRes.
     fractal = bool(int(os.environ.get("FRACTAL", "0")))
     num_unique_layers = int(os.environ.get("NUM_UNIQUE_LAYERS", 3))
@@ -747,7 +749,7 @@ class AttnResModule(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.query = nn.Parameter(torch.randn(dim) * 0.01)
-        # Learned prior: gives loop-1 layers something to attend against
+        # Learned prior: gives early layers something to attend against
         self.prior = nn.Parameter(torch.randn(dim) * 0.01)
 
     def forward(self, loop_outputs: list[Tensor], x_current: Tensor) -> Tensor:
@@ -760,6 +762,81 @@ class AttnResModule(nn.Module):
         logits = torch.einsum("d, n b t d -> n b t", self.query, K)
         weights = logits.softmax(dim=0)
         return torch.einsum("n b t, n b t d -> b t d", weights, V)
+
+
+# -----------------------------
+# PURE ATTNRES GPT (paper's actual proposal)
+# Standard 9-layer transformer, U-Net skips replaced with AttnRes
+# -----------------------------
+
+class AttnResGPT(nn.Module):
+    """Baseline architecture + AttnRes. No weight sharing, no loops, no gravity.
+    This is what the Moonshot paper actually proposes."""
+    def __init__(
+        self,
+        vocab_size: int,
+        num_layers: int,
+        model_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: int,
+        tie_embeddings: bool,
+        tied_embed_init_std: float,
+        logit_softcap: float,
+        rope_base: float,
+        qk_gain_init: float,
+    ):
+        super().__init__()
+        self.tie_embeddings = tie_embeddings
+        self.tied_embed_init_std = tied_embed_init_std
+        self.logit_softcap = logit_softcap
+        self.num_layers = num_layers
+
+        self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        self.blocks = nn.ModuleList([
+            Block(model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            for _ in range(num_layers)
+        ])
+        self.final_norm = RMSNorm()
+        self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
+        if self.lm_head is not None:
+            self.lm_head._zero_init = True
+
+        # AttnRes: one module per layer
+        self.attnres = nn.ModuleList([AttnResModule(model_dim) for _ in range(num_layers)])
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        if self.tie_embeddings:
+            nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
+        for module in self.modules():
+            if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
+                nn.init.zeros_(module.weight)
+
+    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        x = self.tok_emb(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
+
+        layer_outputs: list[Tensor] = [x]  # embedding as first "layer output"
+
+        for i in range(self.num_layers):
+            # AttnRes: selectively aggregate all previous layer outputs
+            x = self.attnres[i](layer_outputs, x)
+            # Standard transformer block
+            x = self.blocks[i](x, x0)
+            # Store for future AttnRes
+            layer_outputs.append(x)
+
+        x = self.final_norm(x).reshape(-1, x.size(-1))
+        targets = target_ids.reshape(-1)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            logits_proj = self.lm_head(x)
+        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        return F.cross_entropy(logits.float(), targets, reduction="mean")
 
 
 # -----------------------------
@@ -981,7 +1058,22 @@ def main() -> None:
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
 
-    if args.fractal:
+    if args.attnres_pure:
+        log0("attnres_pure_mode:on — standard layers + AttnRes replacing U-Net skips")
+        base_model = AttnResGPT(
+            vocab_size=args.vocab_size,
+            num_layers=args.num_layers,
+            model_dim=args.model_dim,
+            num_heads=args.num_heads,
+            num_kv_heads=args.num_kv_heads,
+            mlp_mult=args.mlp_mult,
+            tie_embeddings=args.tie_embeddings,
+            tied_embed_init_std=args.tied_embed_init_std,
+            logit_softcap=args.logit_softcap,
+            rope_base=args.rope_base,
+            qk_gain_init=args.qk_gain_init,
+        ).to(device).bfloat16()
+    elif args.fractal:
         log0(f"fractal_mode:on unique_layers:{args.num_unique_layers} loops:{args.num_loops} "
              f"gravity:{args.use_gravity} attnres:{args.use_attnres} "
              f"breath:{','.join(args.breath_pattern)}")
@@ -1020,7 +1112,7 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
-    use_fullgraph = not args.fractal  # fractal has dynamic list ops that may break fullgraph
+    use_fullgraph = not (args.fractal or args.attnres_pure)  # dynamic list ops may break fullgraph
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=use_fullgraph)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
@@ -1047,11 +1139,12 @@ def main() -> None:
         scalar_params.append(base_model.loop_pos)
     if hasattr(base_model, 'gravity_logits'):
         scalar_params.append(base_model.gravity_logits)
-    # AttnRes query + prior vectors are small — treat as scalar/Adam
-    if hasattr(base_model, 'attnres_modules'):
-        for arm in base_model.attnres_modules:
-            scalar_params.append(arm.query)
-            scalar_params.append(arm.prior)
+    # AttnRes query + prior vectors — treat as scalar/Adam
+    for attnres_list_attr in ['attnres_modules', 'attnres']:
+        if hasattr(base_model, attnres_list_attr):
+            for arm in getattr(base_model, attnres_list_attr):
+                scalar_params.append(arm.query)
+                scalar_params.append(arm.prior)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
