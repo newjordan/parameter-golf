@@ -92,6 +92,10 @@ class Hyperparameters:
     num_loops = int(os.environ.get("NUM_LOOPS", 3))
     use_gravity = bool(int(os.environ.get("USE_GRAVITY", "1")))
     use_attnres = bool(int(os.environ.get("USE_ATTNRES", "1")))
+    # Breathing pattern: comma-separated "full" or "cheap" per loop
+    # "cheap" loops skip MLP (attention-only refinement)
+    # Default: "full,cheap,full" — stroke, glide, stroke
+    breath_pattern = os.environ.get("BREATH_PATTERN", "full,cheap,full").split(",")
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -643,12 +647,13 @@ class Block(nn.Module):
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
 
-    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+    def forward(self, x: Tensor, x0: Tensor, skip_mlp: bool = False) -> Tensor:
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(self.attn_norm(x))
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
-        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
+        if not skip_mlp:
+            x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
 
 
@@ -778,6 +783,7 @@ class FractalGPT(nn.Module):
         qk_gain_init: float,
         use_gravity: bool = True,
         use_attnres: bool = True,
+        breath_pattern: list[str] | None = None,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -789,6 +795,10 @@ class FractalGPT(nn.Module):
         self.logit_softcap = logit_softcap
         self.use_gravity = use_gravity
         self.use_attnres = use_attnres
+        # Breathing: which loops are "full" (attn+mlp) vs "cheap" (attn only)
+        if breath_pattern is None:
+            breath_pattern = ["full"] * num_loops
+        self.breath_pattern = breath_pattern
 
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.blocks = nn.ModuleList([
@@ -842,11 +852,12 @@ class FractalGPT(nn.Module):
 
         for loop in range(self.num_loops):
             x = x + self.loop_pos[loop].to(dtype=x.dtype)
+            is_cheap = self.breath_pattern[loop].strip() == "cheap"
 
             for layer_idx in range(self.num_unique_layers):
                 if self.use_attnres:
                     x = self.attnres_modules[flat_idx](loop_outputs, x)
-                x = self.blocks[layer_idx](x, x0)
+                x = self.blocks[layer_idx](x, x0, skip_mlp=is_cheap)
                 flat_idx += 1
 
             loop_outputs.append(x)
@@ -972,7 +983,8 @@ def main() -> None:
 
     if args.fractal:
         log0(f"fractal_mode:on unique_layers:{args.num_unique_layers} loops:{args.num_loops} "
-             f"gravity:{args.use_gravity} attnres:{args.use_attnres}")
+             f"gravity:{args.use_gravity} attnres:{args.use_attnres} "
+             f"breath:{','.join(args.breath_pattern)}")
         base_model = FractalGPT(
             vocab_size=args.vocab_size,
             num_unique_layers=args.num_unique_layers,
@@ -988,6 +1000,7 @@ def main() -> None:
             qk_gain_init=args.qk_gain_init,
             use_gravity=args.use_gravity,
             use_attnres=args.use_attnres,
+            breath_pattern=args.breath_pattern,
         ).to(device).bfloat16()
     else:
         base_model = GPT(

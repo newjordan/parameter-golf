@@ -104,6 +104,35 @@ case $MODE in
         export MLP_MULT=2
         export NUM_LAYERS=9
         ;;
+    breathing)
+        export RUN_ID="breathing_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+        export FRACTAL=1
+        export NUM_UNIQUE_LAYERS=3
+        export NUM_LOOPS=3
+        export USE_GRAVITY=1
+        export USE_ATTNRES=0
+        export BREATH_PATTERN="full,cheap,full"
+        # Wider than before — cheap loop saves compute budget
+        export MODEL_DIM=864
+        export NUM_HEADS=8
+        export NUM_KV_HEADS=4
+        export MLP_MULT=2
+        export NUM_LAYERS=9
+        ;;
+    breathing_no_gravity)
+        export RUN_ID="breathing_nograv_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+        export FRACTAL=1
+        export NUM_UNIQUE_LAYERS=3
+        export NUM_LOOPS=3
+        export USE_GRAVITY=0
+        export USE_ATTNRES=0
+        export BREATH_PATTERN="full,cheap,full"
+        export MODEL_DIM=864
+        export NUM_HEADS=8
+        export NUM_KV_HEADS=4
+        export MLP_MULT=2
+        export NUM_LAYERS=9
+        ;;
     *)
         echo "Unknown mode: $MODE"
         echo "Options: baseline, fractal, fractal_only, fractal_no_gravity"
