@@ -81,6 +81,11 @@ def call_grok(
         "stream": False,
     }).encode("utf-8")
 
+    # Bypass any container proxy settings (RunPod sets http_proxy which
+    # urllib picks up but that proxy blocks external HTTPS)
+    proxy_handler = urllib.request.ProxyHandler({})
+    opener = urllib.request.build_opener(proxy_handler)
+
     req = urllib.request.Request(
         XAI_API_URL,
         data=payload,
@@ -92,7 +97,7 @@ def call_grok(
 
     for attempt in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with opener.open(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"]
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
