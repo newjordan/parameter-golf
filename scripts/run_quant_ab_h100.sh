@@ -8,6 +8,8 @@ CONTROL_LOG="${CONTROL_LOG:-records/track_10min_16mb/2026-03-17_NaiveBaseline/tr
 DATA_PATH="${DATA_PATH:-$REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-$REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 NPROC="${NPROC:-8}"
+RUN_T1="${RUN_T1:-0}"
+RUN_T2="${RUN_T2:-1}"
 
 if [[ ! -f "$CONTROL_LOG" ]]; then
   echo "Missing control log: $CONTROL_LOG"
@@ -104,23 +106,37 @@ run_treatment() {
 
 echo "control: $CONTROL_LOG" | tee "$COMMANDS_FILE"
 
-run_treatment \
-  "T1" \
-  "99.9999" \
-  "65536" \
-  "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights"
+RUNS=()
 
-run_treatment \
-  "T2" \
-  "99.99995" \
-  "131072" \
-  "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,final_norm,tok_emb"
+if [[ "$RUN_T1" == "1" ]]; then
+  run_treatment \
+    "T1" \
+    "99.9999" \
+    "65536" \
+    "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights"
+  RUNS+=("T1")
+fi
+
+if [[ "$RUN_T2" == "1" ]]; then
+  run_treatment \
+    "T2" \
+    "99.99995" \
+    "131072" \
+    "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,final_norm,tok_emb"
+  RUNS+=("T2")
+fi
+
+if [[ "${#RUNS[@]}" -eq 0 ]]; then
+  echo "No treatments selected. Set RUN_T2=1 and/or RUN_T1=1."
+  exit 1
+fi
 
 {
   echo "run|final_int8_zlib_roundtrip_exact_val_bpb|pre_quant_val_bpb|quant_gap_post_minus_pre|total_submission_size_int8_zlib_bytes|train_ms|eval_ms|train_plus_eval_ms"
   emit_row "control" "$CONTROL_LOG"
-  emit_row "T1" "$OUTDIR/T1.log"
-  emit_row "T2" "$OUTDIR/T2.log"
+  for run in "${RUNS[@]}"; do
+    emit_row "$run" "$OUTDIR/${run}.log"
+  done
 } > "$METRICS_TSV"
 
 CONTROL_POST="$(awk -F'|' '$1=="control"{print $2}' "$METRICS_TSV")"
@@ -132,7 +148,7 @@ if [[ -z "$BEST_LABEL" ]]; then
 elif awk -v a="$BEST_POST" -v b="$CONTROL_POST" 'BEGIN{exit !(a < b)}'; then
   RECOMMENDATION="keep ${BEST_LABEL}: lower final_int8_zlib_roundtrip_exact val_bpb than control while staying under 16,000,000 bytes."
 else
-  RECOMMENDATION="iterate: neither T1 nor T2 beat control on final_int8_zlib_roundtrip_exact val_bpb; next knob change should sweep INT8_CLIP_PERCENTILE in 99.9999-99.99997 while keeping T1 patterns and testing INT8_KEEP_FLOAT_MAX_NUMEL in {65536,98304,131072}."
+  RECOMMENDATION="iterate: selected treatment set did not beat control on final_int8_zlib_roundtrip_exact val_bpb; next knob change should sweep INT8_CLIP_PERCENTILE in 99.9999-99.99997 while testing INT8_KEEP_FLOAT_MAX_NUMEL in {65536,98304,131072}."
 fi
 
 {
@@ -148,7 +164,7 @@ fi
   cat "$COMMANDS_FILE"
   echo '```'
   echo
-  echo "## Metrics (Control vs T1 vs T2)"
+  echo "## Metrics (Control vs Selected Treatments)"
   echo
   echo "| run | final_int8_zlib_roundtrip_exact val_bpb | pre-quant val_bpb | quantization gap (post-pre) | total submission size int8+zlib (bytes) | train ms | eval ms | train+eval ms |"
   echo "|---|---:|---:|---:|---:|---:|---:|---:|"
