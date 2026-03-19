@@ -291,6 +291,18 @@ def agent_loop(
     print(f"  Results:     {RESULTS_FILE}")
     print(f"{'='*70}\n")
 
+    # Ensure training data is downloaded
+    data_dir = REPO_ROOT / "data" / "datasets" / "fineweb10B_sp1024"
+    tokenizer_file = REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model"
+    if not data_dir.exists() or not tokenizer_file.exists():
+        print("[setup] Training data not found — downloading...")
+        dl_script = REPO_ROOT / "data" / "cached_challenge_fineweb.py"
+        subprocess.run(
+            [sys.executable, str(dl_script), "--variant", "sp1024"],
+            cwd=str(REPO_ROOT), check=True,
+        )
+        print("[setup] Download complete.")
+
     # Pull latest before starting
     if not dry_run:
         git_sync_pull()
