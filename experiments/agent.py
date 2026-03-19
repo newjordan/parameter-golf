@@ -30,10 +30,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,28 +78,29 @@ def call_grok(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
-    }).encode("utf-8")
-
-    # Bypass any container proxy settings (RunPod sets http_proxy which
-    # urllib picks up but that proxy blocks external HTTPS)
-    proxy_handler = urllib.request.ProxyHandler({})
-    opener = urllib.request.build_opener(proxy_handler)
-
-    req = urllib.request.Request(
-        XAI_API_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
+    })
 
     for attempt in range(4):
         try:
-            with opener.open(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            # Use curl via subprocess — urllib often fails due to proxy env
+            # vars or User-Agent blocking; curl works reliably on RunPod.
+            result = subprocess.run(
+                [
+                    "curl", "-s", "--noproxy", "*", "--max-time", "120",
+                    XAI_API_URL,
+                    "-H", "Content-Type: application/json",
+                    "-H", f"Authorization: Bearer {api_key}",
+                    "-d", payload,
+                ],
+                capture_output=True, text=True, timeout=130,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"curl exit {result.returncode}: {result.stderr}")
+            data = json.loads(result.stdout)
+            if "error" in data:
+                raise RuntimeError(f"API error: {data['error']}")
+            return data["choices"][0]["message"]["content"]
+        except (RuntimeError, json.JSONDecodeError, KeyError, subprocess.TimeoutExpired) as e:
             if attempt < 3:
                 delay = 2 ** (attempt + 1)
                 print(f"  [grok] API call failed ({e}), retrying in {delay}s...")
