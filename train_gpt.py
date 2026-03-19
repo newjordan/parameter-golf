@@ -86,6 +86,9 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # AttnRes: replace U-Net skips with attention over depth (fullgraph-compatible)
+    use_attnres = bool(int(os.environ.get("USE_ATTNRES", "0")))
+
 # -----------------------------
 # MUON OPTIMIZER 
 # -----------------------------
@@ -659,6 +662,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        use_attnres: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -666,11 +670,22 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.num_layers = num_layers
+        self.use_attnres = use_attnres
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+
+        if not use_attnres:
+            # Original U-Net skip connections
+            self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+        else:
+            # AttnRes: one learned query per layer, attending over all previous layers
+            # Stored as a single [num_layers, dim] parameter matrix
+            self.skip_weights = nn.Parameter(torch.zeros(0))  # dummy for compat
+            self.attnres_queries = nn.Parameter(torch.randn(num_layers, model_dim) * 0.01)
+
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -697,20 +712,54 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
+    def _attnres(self, cache: Tensor, n_valid: int, query: Tensor) -> Tensor:
+        """AttnRes over the first n_valid entries in cache. Fully static ops.
+        cache: [max_layers+1, B, T, D] — pre-allocated, filled slots 0..n_valid-1
+        query: [D] — learned query for this layer
+        Returns: [B, T, D] — weighted combination of cached representations
+        """
+        # Create a mask: valid entries get 0, invalid get -inf
+        # This is fullgraph-safe: no dynamic shapes, just arithmetic on fixed tensors
+        max_n = cache.size(0)
+        idx = torch.arange(max_n, device=cache.device)
+        mask = torch.where(idx < n_valid, 0.0, float("-inf"))  # [max_n]
+
+        # Attention: query dot keys (normed cache entries)
+        K = F.rms_norm(cache, (cache.size(-1),))  # [max_n, B, T, D]
+        logits = torch.einsum("d, n b t d -> n b t", query, K)  # [max_n, B, T]
+        logits = logits + mask[:, None, None]  # mask out unfilled slots
+        weights = logits.softmax(dim=0)  # [max_n, B, T]
+        return torch.einsum("n b t, n b t d -> b t d", weights, cache)
+
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
-        skips: list[Tensor] = []
 
-        # First half stores skips; second half reuses them in reverse order.
-        for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            if skips:
-                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+        if not self.use_attnres:
+            # Original U-Net path (unchanged)
+            skips: list[Tensor] = []
+            for i in range(self.num_encoder_layers):
+                x = self.blocks[i](x, x0)
+                skips.append(x)
+            for i in range(self.num_decoder_layers):
+                if skips:
+                    x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                x = self.blocks[self.num_encoder_layers + i](x, x0)
+        else:
+            # AttnRes path: pre-allocated cache, static indexing
+            B, T, D = x.shape
+            # Cache holds embedding (slot 0) + one slot per layer
+            cache = torch.zeros(self.num_layers + 1, B, T, D, device=x.device, dtype=x.dtype)
+            cache[0] = x  # slot 0 = embedding
+
+            for i in range(self.num_layers):
+                # AttnRes: attend over slots 0..i (embedding + layers 0..i-1)
+                x = self._attnres(cache, i + 1, self.attnres_queries[i])
+                # Standard block
+                x = self.blocks[i](x, x0)
+                # Write into next slot
+                cache[i + 1] = x
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -823,6 +872,8 @@ def main() -> None:
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
 
+    if args.use_attnres:
+        log0("attnres_mode:on — fullgraph-compatible, replaces U-Net skips")
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -835,6 +886,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        use_attnres=args.use_attnres,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -861,6 +913,8 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    if hasattr(base_model, 'attnres_queries'):
+        scalar_params.append(base_model.attnres_queries)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
