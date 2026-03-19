@@ -1007,7 +1007,8 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    use_fullgraph = not args.fractal  # fractal has dynamic list ops that may break fullgraph
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=use_fullgraph)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
     # Optimizer split:
@@ -1033,10 +1034,11 @@ def main() -> None:
         scalar_params.append(base_model.loop_pos)
     if hasattr(base_model, 'gravity_logits'):
         scalar_params.append(base_model.gravity_logits)
-    # AttnRes query vectors are small — treat as scalar/Adam
+    # AttnRes query + prior vectors are small — treat as scalar/Adam
     if hasattr(base_model, 'attnres_modules'):
         for arm in base_model.attnres_modules:
             scalar_params.append(arm.query)
+            scalar_params.append(arm.prior)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
