@@ -57,7 +57,7 @@ from sweep import (
 # ---------------------------------------------------------------------------
 
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
-DEFAULT_MODEL = "grok-4-1-fast"
+DEFAULT_MODEL = "grok-4.20-0309-reasoning"
 
 
 def call_grok(
