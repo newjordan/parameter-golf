@@ -1,0 +1,22 @@
+{
+  "tokenizers": [
+    {
+      "name": "sp_bpe_1280",
+      "dataset_suffix": "sp1280",
+      "vocab_size": 1280,
+      "tokenizer_train_docs": 5000000
+    },
+    {
+      "name": "sp_bpe_1536",
+      "dataset_suffix": "sp1536",
+      "vocab_size": 1536,
+      "tokenizer_train_docs": 5000000
+    },
+    {
+      "name": "sp_bpe_2048",
+      "dataset_suffix": "sp2048",
+      "vocab_size": 2048,
+      "tokenizer_train_docs": 5000000
+    }
+  ]
+}
