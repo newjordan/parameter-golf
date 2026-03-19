@@ -705,12 +705,12 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def _attnres(self, cache: Tensor, n_valid: int, query: Tensor) -> Tensor:
-        keys = cache[:n_valid].clone()
+    def _attnres(self, entries: list[Tensor], query: Tensor) -> Tensor:
+        keys = torch.stack(entries)              # [n_valid, B, T, D]
         K = F.rms_norm(keys, (keys.size(-1),))
-        logits = einsum("d, n b t d -> n b t", query, K)
+        logits = einsum("d,nbtd->nbt", query, K)
         weights = logits.softmax(dim=0)
-        return einsum("n b t, n b t d -> b t d", weights, keys)
+        return einsum("nbt,nbtd->btd", weights, keys)
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
@@ -727,13 +727,11 @@ class GPT(nn.Module):
                     x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
                 x = self.blocks[self.num_encoder_layers + i](x, x0)
         else:
-            B, T, D = x.shape
-            cache = torch.zeros(self.num_layers + 1, B, T, D, device=x.device, dtype=x.dtype)
-            cache[0] = x
+            entries: list[Tensor] = [x]
             for i in range(self.num_layers):
-                x = self._attnres(cache, i + 1, self.attnres_queries[i].to(dtype=x.dtype))
+                x = self._attnres(entries, self.attnres_queries[i].to(dtype=x.dtype))
                 x = self.blocks[i](x, x0)
-                cache[i + 1] = x
+                entries.append(x)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
