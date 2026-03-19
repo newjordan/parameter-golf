@@ -737,15 +737,20 @@ class GPT(nn.Module):
 # -----------------------------
 
 class AttnResModule(nn.Module):
-    """Single learned query attending over previous loop outputs."""
+    """Single learned query attending over previous loop outputs.
+    Always fires — even with one input, the query gets gradient."""
     def __init__(self, dim: int):
         super().__init__()
         self.query = nn.Parameter(torch.randn(dim) * 0.01)
+        # Learned prior: gives loop-1 layers something to attend against
+        self.prior = nn.Parameter(torch.randn(dim) * 0.01)
 
-    def forward(self, loop_outputs: list[Tensor]) -> Tensor:
-        if len(loop_outputs) == 1:
-            return loop_outputs[0]
-        V = torch.stack(loop_outputs, dim=0)  # [N, B, T, D]
+    def forward(self, loop_outputs: list[Tensor], x_current: Tensor) -> Tensor:
+        # Always include the learned prior + current state alongside history
+        B, T, D = x_current.shape
+        prior_expanded = self.prior.view(1, 1, D).expand(B, T, D)
+        candidates = [prior_expanded] + loop_outputs + [x_current]
+        V = torch.stack(candidates, dim=0)  # [N+2, B, T, D]
         K = F.rms_norm(V, (V.size(-1),))
         logits = torch.einsum("d, n b t d -> n b t", self.query, K)
         weights = logits.softmax(dim=0)
@@ -839,8 +844,8 @@ class FractalGPT(nn.Module):
             x = x + self.loop_pos[loop].to(dtype=x.dtype)
 
             for layer_idx in range(self.num_unique_layers):
-                if self.use_attnres and len(loop_outputs) > 1:
-                    x = self.attnres_modules[flat_idx](loop_outputs + [x])
+                if self.use_attnres:
+                    x = self.attnres_modules[flat_idx](loop_outputs, x)
                 x = self.blocks[layer_idx](x, x0)
                 flat_idx += 1
 
