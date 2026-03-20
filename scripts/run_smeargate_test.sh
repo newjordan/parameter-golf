@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# SmearGate Isolated Test
+# SmearGate Isolated Test — on the deep 11L config to use 16MB budget
 #
 # Two runs:
-#   1) Baseline (no SmearGate) — int6 + QAT + sliding window
-#   2) SmearGate enabled      — int6 + QAT + sliding window + SmearGate
+#   1) 11L/512d baseline — no SmearGate
+#   2) 11L/512d + SmearGate — bigram blending
 #
-# Compare BPB to measure SmearGate's impact.
+# Both use int6 + QAT + sliding window.
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
 
-# Model shape (baseline defaults)
-export NUM_LAYERS="${NUM_LAYERS:-9}"
-export MODEL_DIM="${MODEL_DIM:-512}"
-export NUM_HEADS="${NUM_HEADS:-8}"
-export NUM_KV_HEADS="${NUM_KV_HEADS:-4}"
-export MLP_MULT="${MLP_MULT:-2}"
-export TIE_EMBEDDINGS="${TIE_EMBEDDINGS:-1}"
+# Deep config: 11L to fill 16MB budget
+export NUM_LAYERS=11
+export MODEL_DIM=512
+export NUM_HEADS=8
+export NUM_KV_HEADS=4
+export MLP_MULT=2
+export TIE_EMBEDDINGS=1
 
 # Training
 export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
@@ -38,29 +38,29 @@ LOGDIR="logs/smeargate_test_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 
 echo "============================================"
-echo "  SmearGate A/B Test"
+echo "  SmearGate A/B Test (11L/512d)"
 echo "  Logs: $LOGDIR"
 echo "============================================"
 
-# --- Run 1: Baseline (no SmearGate) ---
+# --- Run 1: 11L baseline (no SmearGate) ---
 echo ""
-echo "[1/2] Baseline — int6 + QAT + slide512 (no SmearGate)"
-export RUN_ID="baseline_no_smear"
+echo "[1/2] 11L/512d baseline — no SmearGate"
+export RUN_ID="11L_no_smear"
 export SMEAR_GATE=0
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
-    2>&1 | tee "$LOGDIR/run1_baseline.log"
+    2>&1 | tee "$LOGDIR/run1_11L_baseline.log"
 
-# --- Run 2: SmearGate enabled ---
+# --- Run 2: 11L + SmearGate ---
 echo ""
-echo "[2/2] SmearGate — int6 + QAT + slide512 + SmearGate"
-export RUN_ID="smeargate"
+echo "[2/2] 11L/512d + SmearGate"
+export RUN_ID="11L_smeargate"
 export SMEAR_GATE=1
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
-    2>&1 | tee "$LOGDIR/run2_smeargate.log"
+    2>&1 | tee "$LOGDIR/run2_11L_smeargate.log"
 
 # --- Summary ---
 echo ""
