@@ -30,8 +30,19 @@
 - Peak memory: 10.1GB (MLP2x), 11.0GB (MLP3x)
 - Compression ratio: ~5.2x (int6+zlib vs raw torch)
 
+## Additional Runs
+
+| Run | Config | Params | Steps | Pre-quant | Quant BPB | Artifact |
+|-----|--------|--------|-------|-----------|-----------|----------|
+| 4 | 11L/512d MLP2x, slide512 | 20.7M | 10702 | 1.2054 | 1.2784 | 15.2MB |
+| 5 | 9L/512d MLP3x, earlyQAT25, slide512 | 21.8M | 12214 | 1.1983 | 1.2607 | 15.9MB |
+
+### Findings from additional runs
+- **11L vs MLP3x**: MLP3x wins on both pre-quant (1.1983 vs 1.2054) and post-quant (1.2607 vs 1.2784). Wider MLPs beat deeper layers.
+- **Early QAT (25% vs 50%)**: Improved quant BPB from 1.2681 → 1.2607 (-0.007). Modest but real.
+- **11L is slower**: 56ms/step vs 50ms/step for MLP3x, fewer total steps in wallclock.
+
 ## Next Steps
 
-- Test 11L/512d MLP2x (deeper, fill budget with layers instead of width)
-- Test SmearGate on 11L config
-- Test fractal 3x3 at 960d (weight sharing allows wider model)
+- FP16 embed is the game changer (see suite 2)
+- SmearGate + BigramHash + OrthoInit for further gains
