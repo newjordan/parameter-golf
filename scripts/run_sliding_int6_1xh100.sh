@@ -24,7 +24,7 @@ export TIE_EMBEDDINGS="${TIE_EMBEDDINGS:-1}"
 # Training
 export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
 export TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-1024}"
-export ITERATIONS="${ITERATIONS:-1080}"
+export ITERATIONS="${ITERATIONS:-20000}"
 export TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-200}"
 export VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-500}"
 export MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-600}"
@@ -46,7 +46,7 @@ export EVAL_STRIDE=0
 export QAT_START_FRAC=0.5
 
 NCCL_IB_DISABLE=1 \
-torchrun --standalone --nproc_per_node=1 train_gpt.py \
+torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run1_int6_qat.log"
 
 # --- Run 2: Int6 + QAT + Sliding Window (stride=512) ---
@@ -58,7 +58,7 @@ export EVAL_STRIDE=512
 export QAT_START_FRAC=0.5
 
 NCCL_IB_DISABLE=1 \
-torchrun --standalone --nproc_per_node=1 train_gpt.py \
+torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run2_int6_slide512.log"
 
 # --- Summary ---
