@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# LEADERBOARD KILLER — every proven technique from top entries
+# LEADERBOARD KILLER — optimized for 16MB with FP16 embed
 #
-# Top validated: 1.1483 (SmearGate + BigramHash + OrthoInit + MLP3x + SWA + MuonWD)
-# Our best:      1.1693 (MLP3x + earlyQAT + stride64 + fp16embed + muonWD)
+# Our 1.1693 BPB was real but busted 16MB by 340KB.
+# Fix: shrink MLP from 1536 (3×) to 1344 (~2.625×) to fit FP16 embed.
+# Then stack SmearGate + BigramHash + OrthoInit on top.
 #
-# This script stacks everything the top entries use:
-#   - MLP 3× architecture (proven)
-#   - Early QAT 25% (proven)
-#   - Stride 64 eval (proven)
-#   - SmearGate (top 2 entries use it)
-#   - BigramHash (top 2 entries use it, ~590K params)
-#   - OrthoInit (top 3 entries use it)
-#   - Muon weight decay (proven)
-#
-# NOTE: No FP16 embed — busts 16MB with BigramHash added
+# Single run — our best shot at the leaderboard.
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
@@ -40,22 +32,23 @@ mkdir -p "$LOGDIR"
 
 echo "============================================"
 echo "  LEADERBOARD KILLER"
+echo "  MLP 1344 + FP16 embed + SmearGate + BigramHash + OrthoInit"
 echo "  Target: <1.15 BPB"
 echo "  Logs: $LOGDIR"
 echo "============================================"
 
-# --- Run 1: FULL STACK (everything) ---
 echo ""
-echo "[1/1] FULL STACK: MLP3x + SmearGate + BigramHash + OrthoInit + earlyQAT + stride64 + MuonWD"
+echo "[1/1] FULL STACK"
 
 QUANT_BITS=6 \
 QAT_START_FRAC=0.25 \
 EVAL_STRIDE=64 \
 MUON_WD=0.01 \
-FP16_EMBED=0 \
+FP16_EMBED=1 \
 SMEAR_GATE=1 \
 BIGRAM_HASH=1 \
 ORTHO_INIT=1 \
+MLP_HIDDEN=1344 \
 RUN_ID=killer_fullstack \
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
@@ -66,7 +59,7 @@ echo ""
 echo "============================================"
 echo "  LEADERBOARD KILLER Complete. Results:"
 echo "============================================"
-echo "  Reference: best_shot fullstack = quant_bpb:1.1693"
+echo "  Reference: best_shot fp16embed = quant_bpb:1.1693 (16.34MB, over limit)"
 echo "  Target: validated leaderboard #1 = 1.1483"
 echo ""
 
