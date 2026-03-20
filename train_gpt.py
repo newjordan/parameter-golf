@@ -86,6 +86,9 @@ class Hyperparameters:
     use_gravity = bool(int(os.environ.get("USE_GRAVITY", "1")))
     use_attnres = bool(int(os.environ.get("USE_ATTNRES", "1")))
     breath_pattern = os.environ.get("BREATH_PATTERN", "full,cheap,full").split(",")
+    # Progressive loop unrolling: comma-separated step thresholds for adding loops
+    # e.g. "0,3000,5000" = 1 loop at start, 2 loops at step 3000, 3 at step 5000
+    loop_schedule = os.environ.get("LOOP_SCHEDULE", "")
 
     # Leaderboard techniques
     muon_wd = float(os.environ.get("MUON_WD", 0.0))  # Muon weight decay
@@ -1021,6 +1024,7 @@ class FractalGPT(nn.Module):
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.num_unique_layers = num_unique_layers
         self.num_loops = num_loops
+        self.active_loops = num_loops  # progressive unrolling: training loop can lower this
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
@@ -1088,9 +1092,10 @@ class FractalGPT(nn.Module):
         targets = target_ids.reshape(-1)
         flat_idx = 0
 
-        for loop in range(self.num_loops):
+        num_active = self.active_loops if self.training else self.num_loops
+        for loop in range(num_active):
             x = x + self.loop_pos[loop].to(dtype=x.dtype)
-            is_cheap = self.breath_pattern[loop].strip() == "cheap"
+            is_cheap = self.breath_pattern[loop].strip() == "cheap" if loop < len(self.breath_pattern) else False
 
             for layer_idx in range(self.num_unique_layers):
                 if self.use_attnres:
@@ -1100,7 +1105,7 @@ class FractalGPT(nn.Module):
 
             loop_outputs.append(x)
 
-            if self.use_gravity and loop < self.num_loops - 1:
+            if self.use_gravity and loop < num_active - 1:
                 aux_logits = self._compute_logits(x)
                 aux_loss = F.cross_entropy(aux_logits.float(), targets, reduction="mean")
                 weight = F.softplus(self.gravity_logits[loop])
@@ -1764,6 +1769,14 @@ def main() -> None:
     swa_start_step = int(args.iterations * args.swa_start_frac) if args.swa_every > 0 else None
     if swa_start_step is not None:
         log0(f"SWA will start at step {swa_start_step}, every {args.swa_every} steps")
+
+    # Progressive loop unrolling schedule
+    loop_thresholds: list[int] = []
+    if args.loop_schedule and args.fractal and hasattr(base_model, 'active_loops'):
+        loop_thresholds = [int(x) for x in args.loop_schedule.split(",")]
+        base_model.active_loops = 1  # start with 1 loop
+        log0(f"Progressive loop unrolling: schedule={loop_thresholds} (starting with 1 loop)")
+
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1807,6 +1820,14 @@ def main() -> None:
             apply_qat_int6(base_model)
             qat_active = True
             log0(f"QAT int6 activated at step {step}")
+
+        # Progressive loop unrolling for fractal
+        if loop_thresholds and hasattr(base_model, 'active_loops'):
+            target_loops = sum(1 for t in loop_thresholds if step >= t)
+            target_loops = max(1, min(target_loops, base_model.num_loops))
+            if target_loops != base_model.active_loops:
+                base_model.active_loops = target_loops
+                log0(f"Fractal loops: {target_loops}/{base_model.num_loops} at step {step}")
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
