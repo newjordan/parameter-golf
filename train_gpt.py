@@ -72,6 +72,7 @@ class Hyperparameters:
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
+    smear_gate = bool(int(os.environ.get("SMEAR_GATE", "0")))
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -896,6 +897,20 @@ class Block(nn.Module):
         return x
 
 
+class SmearGate(nn.Module):
+    """Learnable per-dimension bigram blending on embeddings.
+    Blends each token's embedding with the previous token's embedding
+    via a learned per-dimension gate. Cost: dim parameters (~0.003% of model)."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.gate = nn.Parameter(torch.full((dim,), 3.0))  # sigmoid(3.0) ≈ 0.95
+
+    def forward(self, x: Tensor) -> Tensor:
+        g = torch.sigmoid(self.gate)  # [dim]
+        x_prev = torch.cat([torch.zeros_like(x[:, :1]), x[:, :-1]], dim=1)
+        return g * x + (1 - g) * x_prev
+
+
 class GPT(nn.Module):
     def __init__(
         self,
@@ -910,6 +925,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        smear_gate: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -918,6 +934,7 @@ class GPT(nn.Module):
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        self.smear_gate = SmearGate(model_dim) if smear_gate else None
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -950,6 +967,8 @@ class GPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, reduction: str = "auto") -> Tensor:
         x = self.tok_emb(input_ids)
+        if self.smear_gate is not None:
+            x = self.smear_gate(x)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
@@ -1305,6 +1324,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        smear_gate=args.smear_gate,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1333,6 +1353,8 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    if base_model.smear_gate is not None:
+        scalar_params.append(base_model.smear_gate.gate)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
