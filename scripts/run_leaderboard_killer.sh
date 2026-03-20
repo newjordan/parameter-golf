@@ -44,13 +44,15 @@ echo "[1/1] FULL STACK"
 QUANT_BITS=6 \
 QAT_START_FRAC=0.25 \
 EVAL_STRIDE=64 \
-MUON_WD=0.01 \
+MUON_WD=0.04 \
 FP16_EMBED=1 \
 SMEAR_GATE=1 \
 BIGRAM_HASH=1 \
 ORTHO_INIT=1 \
 MLP_HIDDEN=1408 \
-RUN_ID=killer_fullstack \
+SWA_EVERY=50 \
+SWA_START_FRAC=0.5 \
+RUN_ID=killer_v4_swa \
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run1_fullstack.log"

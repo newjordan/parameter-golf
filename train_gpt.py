@@ -90,6 +90,8 @@ class Hyperparameters:
     # Leaderboard techniques
     muon_wd = float(os.environ.get("MUON_WD", 0.0))  # Muon weight decay
     fp16_embed = bool(int(os.environ.get("FP16_EMBED", "0")))  # keep embeddings in fp16 instead of int6
+    swa_every = int(os.environ.get("SWA_EVERY", 0))  # SWA checkpoint interval (0=disabled)
+    swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))  # fraction of training to start SWA
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -1755,6 +1757,13 @@ def main() -> None:
     qat_start_step = int(args.iterations * args.qat_start_frac) if args.quant_bits == 6 else None
     if qat_start_step is not None:
         log0(f"QAT int6 will activate at step {qat_start_step}/{args.iterations}")
+
+    # SWA: accumulate averaged weights for smoother quantization
+    swa_state: dict[str, Tensor] | None = None
+    swa_count = 0
+    swa_start_step = int(args.iterations * args.swa_start_frac) if args.swa_every > 0 else None
+    if swa_start_step is not None:
+        log0(f"SWA will start at step {swa_start_step}, every {args.swa_every} steps")
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1829,6 +1838,17 @@ def main() -> None:
         zero_grad_all()
 
         step += 1
+
+        # SWA: accumulate running average of weights
+        if swa_start_step is not None and step >= swa_start_step and step % args.swa_every == 0:
+            if swa_state is None:
+                swa_state = {k: v.detach().clone() for k, v in base_model.state_dict().items()}
+                swa_count = 1
+            else:
+                swa_count += 1
+                for k, v in base_model.state_dict().items():
+                    swa_state[k].lerp_(v.detach(), 1.0 / swa_count)
+
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         should_log_train = (
             args.train_log_every > 0
@@ -1864,6 +1884,11 @@ def main() -> None:
     if qat_active:
         remove_qat_int6(base_model)
         qat_active = False
+
+    # Swap in SWA averaged weights if available
+    if swa_state is not None and swa_count > 1:
+        log0(f"SWA: loading averaged weights ({swa_count} checkpoints)")
+        base_model.load_state_dict(swa_state)
 
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
