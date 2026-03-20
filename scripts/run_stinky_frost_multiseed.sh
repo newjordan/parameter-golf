@@ -6,7 +6,8 @@ set -euo pipefail
 # Exact config from PR #190 (1.1725 BPB, 15.58MB)
 # Runs 3 seeds to demonstrate ≥0.005-nat significance
 #
-# Seeds: 42 (original), 137, 2026
+# Original run used seed 1337 (default) → 1.1725 BPB
+# Seeds: 42, 137 (2 additional seeds)
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
@@ -29,11 +30,11 @@ export MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-600}"
 LOGDIR="logs/stinky_frost_multiseed_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 
-SEEDS=(42 137 2026)
+SEEDS=(42 137)
 
 echo "============================================"
 echo "  THE STINKY FROST RECIPE — Multi-Seed"
-echo "  3 seeds for self-validation"
+echo "  2 additional seeds (original: 1337 → 1.1725)"
 echo "  Logs: $LOGDIR"
 echo "============================================"
 
@@ -41,7 +42,7 @@ for i in "${!SEEDS[@]}"; do
     seed="${SEEDS[$i]}"
     run_num=$((i + 1))
     echo ""
-    echo "[${run_num}/3] Seed ${seed}"
+    echo "[${run_num}/2] Seed ${seed}"
 
     SEED=${seed} \
     QUANT_BITS=6 \
