@@ -82,6 +82,10 @@ class Hyperparameters:
     use_attnres = bool(int(os.environ.get("USE_ATTNRES", "1")))
     breath_pattern = os.environ.get("BREATH_PATTERN", "full,cheap,full").split(",")
 
+    # Leaderboard techniques
+    muon_wd = float(os.environ.get("MUON_WD", 0.0))  # Muon weight decay
+    fp16_embed = bool(int(os.environ.get("FP16_EMBED", "0")))  # keep embeddings in fp16 instead of int6
+
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
@@ -129,10 +133,10 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr: float, momentum: float, backend_steps: int, nesterov: bool = True):
+    def __init__(self, params, lr: float, momentum: float, backend_steps: int, nesterov: bool = True, weight_decay: float = 0.0):
         super().__init__(
             params,
-            dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov),
+            dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov, weight_decay=weight_decay),
         )
 
     @torch.no_grad()
@@ -179,8 +183,11 @@ class Muon(torch.optim.Optimizer):
                 dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
 
             curr = 0
+            wd = group.get("weight_decay", 0.0)
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
+                if wd > 0.0:
+                    p.mul_(1.0 - lr * wd)
                 p.add_(g, alpha=-lr)
                 curr += p.numel()
 
@@ -582,14 +589,16 @@ def unpack_int6(packed: Tensor, numel: int) -> Tensor:
     flat = torch.where(flat > 31, flat.to(torch.int8) - 64, flat.to(torch.int8))
     return flat
 
-def quantize_state_dict_int6(state_dict: dict[str, Tensor]):
-    """Quantize state dict to int6 with per-row scales for 2D, per-tensor for others."""
+def quantize_state_dict_int6(state_dict: dict[str, Tensor], fp16_embed_keys: list[str] | None = None):
+    """Quantize state dict to int6 with per-row scales for 2D, per-tensor for others.
+    fp16_embed_keys: list of tensor names to keep in fp16 instead of quantizing."""
     quantized: dict[str, Tensor] = {}
     scales: dict[str, Tensor] = {}
     dtypes: dict[str, str] = {}
     passthrough: dict[str, Tensor] = {}
     passthrough_orig_dtypes: dict[str, str] = {}
     shapes: dict[str, list[int]] = {}
+    fp16_embed_keys = fp16_embed_keys or []
     stats = dict.fromkeys(
         ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors",
          "baseline_tensor_bytes", "int6_payload_bytes"), 0,
@@ -605,6 +614,14 @@ def quantize_state_dict_int6(state_dict: dict[str, Tensor]):
             stats["num_nonfloat_tensors"] += 1
             passthrough[name] = t
             stats["int6_payload_bytes"] += tensor_nbytes(t)
+            continue
+
+        # Keep specified embeddings in fp16 instead of quantizing
+        if name in fp16_embed_keys:
+            kept = t.to(torch.float16).contiguous()
+            passthrough[name] = kept
+            passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
+            stats["int6_payload_bytes"] += tensor_nbytes(kept)
             continue
 
         if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
@@ -1573,6 +1590,7 @@ def main() -> None:
         lr=args.matrix_lr,
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
+        weight_decay=args.muon_wd,
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
@@ -1789,7 +1807,8 @@ def main() -> None:
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
     if args.quant_bits == 6:
-        quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict())
+        fp16_keys = ["tok_emb.weight"] if args.fp16_embed else []
+        quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict(), fp16_embed_keys=fp16_keys)
         quant_label = "int6"
         dequant_fn = dequantize_state_dict_int6
         payload_key = "int6_payload_bytes"
