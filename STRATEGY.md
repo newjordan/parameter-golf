@@ -19,15 +19,42 @@ Source: agent-ar.com/leaderboard-param-golf/strategies.html
 
 ### Leaderboard State
 
-| Entry | BPB | Δ vs Baseline | Techniques |
-|-------|----:|:-------------:|-----------|
-| Bhautik Bavadiya (#1) | 0.9695 | ▼ 0.2549 | Unknown — significantly beyond known techniques |
-| Sam Larson (#2) | 1.1574 | ▼ 0.0670 | Int6 + MLP 3× + Sliding Window |
-| Baseline | 1.2244 | — | Int8 + MLP 2× + fixed-chunk eval |
+| Entry | BPB | Track | Techniques |
+|-------|----:|:-----:|-----------|
+| Bhautik Bavadiya (#1) | 0.9695 | Val-only | Int6 QAT + MLP 3× + Slide-64 + seq4096 + val-only training |
+| Bhautik Bavadiya (standard) | 1.1629 | Standard | Same arch, standard training |
+| Sam Larson (#2) | 1.1574 | Standard | Int6 + MLP 3× + Sliding Window |
+| Baseline | 1.2244 | Standard | Int8 + MLP 2× + fixed-chunk eval |
 
-**Key insight:** Bavadiya's 0.9695 BPB is a **massive** gap (0.1879 BPB ahead of #2).
-The known formula of `int6 QAT + MLP 3× + sliding window eval` only gets to ~1.16.
-Bavadiya must be using additional techniques beyond what's publicly documented.
+**Key insight from PR #64 analysis:** Bavadiya's 0.9695 is from **val-only training**
+(organizer-approved separate track). His standard-track score is 1.1629, very close to
+Sam Larson's 1.1574. The 0.27 BPB gap is mostly from training on validation data.
+
+### Bavadiya's 6 Techniques (from PR #64)
+
+1. **MLP 3× expansion** — h=1536, ~21.8M params, 9 layers (reduced from 10)
+2. **STE Fake-Int6 QAT** — weights fake-quantized to [-31,31] during forward pass,
+   reduces quantization penalty from ~0.05 to ~0.001 BPB
+3. **Mixed post-training quantization** — int6 per-row on block weights, int8 per-row
+   on embedding (embeddings are more quantization-sensitive)
+4. **Sliding window eval (stride=64)** — every token scored with 960+ context
+   (much finer than typical stride-512; eval takes ~306 seconds)
+5. **Tuned Muon optimizer** — momentum=0.99, LR=0.02, warmdown=3000, seq_len=4096
+6. **Val-only training** (val-only track only) — trains directly on validation set
+
+**Artifact size:** ~15.3–15.4 MB (leaves headroom under 16MB cap)
+
+### What This Means For Our Strategy
+
+Bavadiya uses NO weight sharing, NO fractal loops, NO novel architecture. He wins with
+meticulous hyperparameter tuning + known techniques. This is great news for us:
+**fractal weight sharing is an orthogonal, additive improvement** on top of his stack.
+
+New actionable insights from Bavadiya:
+- Use **stride=64** (not 512) for sliding window eval — bigger win, worth the eval time
+- Train with **seq_len=4096** — 4× longer context helps significantly
+- **Mixed quantization** — int6 for blocks, int8 for embeddings
+- **Muon tuning** — momentum=0.99, LR=0.02, warmdown=3000
 
 ---
 
