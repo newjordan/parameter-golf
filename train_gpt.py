@@ -88,6 +88,10 @@ class Hyperparameters:
 
     # Int6 quantization-aware training.
     qat_bits = int(os.environ.get("QAT_BITS", "6"))  # 0 to disable QAT
+    qat_warmup_steps = int(os.environ.get("QAT_WARMUP_STEPS", "0"))  # steps before QAT activates
+    qat_prob = float(os.environ.get("QAT_PROB", "1.0"))  # per-layer quant probability (Fan et al. 2020)
+    qat_start_bits = int(os.environ.get("QAT_START_BITS", "0"))  # progressive annealing: start bits (0=disabled)
+    qat_anneal_steps = int(os.environ.get("QAT_ANNEAL_STEPS", "0"))  # steps to anneal from start_bits to qat_bits
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -190,6 +194,27 @@ def fake_quant_ste(weight: Tensor, bits: int = 6) -> Tensor:
     q = torch.clamp(torch.round(weight / scale), -q_max, q_max)
     w_q = q * scale
     return weight + (w_q - weight).detach()
+
+
+def get_effective_qat_bits(step: int, args) -> int:
+    """Compute effective QAT bits for the current training step.
+
+    Supports three scheduling features:
+    - Warmup: no QAT for the first qat_warmup_steps steps.
+    - Progressive annealing: linearly decrease bits from qat_start_bits to
+      qat_bits over qat_anneal_steps steps (after warmup).
+    - Returns 0 when QAT should be disabled for this step.
+    """
+    if args.qat_bits <= 0:
+        return 0
+    if step < args.qat_warmup_steps:
+        return 0
+    if args.qat_start_bits > args.qat_bits and args.qat_anneal_steps > 0:
+        anneal_step = step - args.qat_warmup_steps
+        if anneal_step < args.qat_anneal_steps:
+            frac = anneal_step / args.qat_anneal_steps
+            return round(args.qat_start_bits + frac * (args.qat_bits - args.qat_start_bits))
+    return args.qat_bits
 
 
 # -----------------------------
@@ -884,8 +909,13 @@ def main() -> None:
     # -----------------------------
 
     # Enable QAT so CastedLinear applies fake quantization during training.
-    CastedLinear._qat_bits = args.qat_bits
-    log0(f"qat_bits:{args.qat_bits} quant_bits:{QUANT_BITS}")
+    # Effective bits may change per step if warmup or annealing is configured.
+    CastedLinear._qat_bits = get_effective_qat_bits(0, args)
+    log0(
+        f"qat_bits:{args.qat_bits} quant_bits:{QUANT_BITS} "
+        f"qat_warmup:{args.qat_warmup_steps} qat_prob:{args.qat_prob} "
+        f"qat_anneal:{args.qat_start_bits}->{args.qat_bits}@{args.qat_anneal_steps}steps"
+    )
 
     base_model = GPT(
         vocab_size=args.vocab_size,
@@ -1070,6 +1100,14 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+        # Update effective QAT bits for warmup / progressive annealing.
+        # Stochastic QAT (Fan et al. 2020): randomly disable QAT for this step
+        # with probability (1 - qat_prob). Decision is made outside torch.compile
+        # to avoid graph breaks. At qat_prob=1.0 every step is quantized.
+        effective_bits = get_effective_qat_bits(step, args)
+        if effective_bits > 0 and args.qat_prob < 1.0 and random.random() >= args.qat_prob:
+            effective_bits = 0
+        CastedLinear._qat_bits = effective_bits
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
