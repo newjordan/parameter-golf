@@ -46,7 +46,7 @@ echo "============================================"
 
 # --- Run 1: FULL STACK (everything) ---
 echo ""
-echo "[1/2] FULL STACK: MLP3x + SmearGate + BigramHash + OrthoInit + earlyQAT + stride64 + MuonWD"
+echo "[1/1] FULL STACK: MLP3x + SmearGate + BigramHash + OrthoInit + earlyQAT + stride64 + MuonWD"
 
 QUANT_BITS=6 \
 QAT_START_FRAC=0.25 \
@@ -60,23 +60,6 @@ RUN_ID=killer_fullstack \
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run1_fullstack.log"
-
-# --- Run 2: Without SmearGate/BigramHash (ablation) ---
-echo ""
-echo "[2/2] ABLATION: MLP3x + OrthoInit + earlyQAT + stride64 + MuonWD (no SmearGate/BigramHash)"
-
-QUANT_BITS=6 \
-QAT_START_FRAC=0.25 \
-EVAL_STRIDE=64 \
-MUON_WD=0.01 \
-FP16_EMBED=0 \
-SMEAR_GATE=0 \
-BIGRAM_HASH=0 \
-ORTHO_INIT=1 \
-RUN_ID=killer_ablation \
-NCCL_IB_DISABLE=1 \
-torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
-    2>&1 | tee "$LOGDIR/run2_ablation.log"
 
 # --- Summary ---
 echo ""
