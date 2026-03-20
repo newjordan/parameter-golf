@@ -1,0 +1,60 @@
+## Attempt 04 — First Int6 QAT Test (1xH100)
+## Date: 2026-03-20
+## Config: QAT_BITS=6, QUANT_BITS=8 (int8 post-training), VAL_LOSS_EVERY=1000
+## Note: Post-training quantization was int8, not int6. Next run should use QUANT_BITS=6.
+
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/20000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9357 train_time:440ms step_avg:439.62ms
+step:2/20000 train_loss:16.7413 train_time:924ms step_avg:461.97ms
+step:3/20000 train_loss:8.7525 train_time:1435ms step_avg:478.21ms
+step:4/20000 train_loss:6.5885 train_time:1924ms step_avg:480.99ms
+step:5/20000 train_loss:6.6519 train_time:2436ms step_avg:487.15ms
+step:6/20000 train_loss:6.6998 train_time:2926ms step_avg:487.70ms
+step:7/20000 train_loss:6.3334 train_time:3433ms step_avg:490.36ms
+step:8/20000 train_loss:6.1813 train_time:3921ms step_avg:490.12ms
+step:9/20000 train_loss:6.0838 train_time:4428ms step_avg:491.98ms
+step:10/20000 train_loss:5.9958 train_time:4923ms step_avg:492.32ms
+step:200/20000 train_loss:2.7856 train_time:102054ms step_avg:510.27ms
+step:400/20000 train_loss:2.3858 train_time:206361ms step_avg:515.90ms
+step:600/20000 train_loss:2.4781 train_time:310781ms step_avg:517.97ms
+step:800/20000 train_loss:2.3186 train_time:415396ms step_avg:519.24ms
+step:1000/20000 train_loss:2.3308 train_time:519846ms step_avg:519.85ms
+step:1000/20000 val_loss:2.2986 val_bpb:1.3614 train_time:519850ms step_avg:519.85ms
+step:1154/20000 val_loss:2.2751 val_bpb:1.3474 train_time:600257ms step_avg:520.15ms
+stopping_early: wallclock_cap train_time:600257ms step:1154/20000
+peak memory allocated: 10303 MiB reserved: 10850 MiB
+Serialized model: 67224983 bytes
+Code size: 54611 bytes
+Total submission size: 67279594 bytes
+Serialized model int8+zlib: 12931556 bytes (payload:17178912 raw_torch:17224025 payload_ratio:3.91x)
+Total submission size int8+zlib: 12986167 bytes
+final_int8_zlib_roundtrip val_loss:2.2775 val_bpb:1.3488 eval_time:17813ms
+final_int8_zlib_roundtrip_exact val_loss:2.27745613 val_bpb:1.34883780
+
+## Summary
+- Steps completed: 1154/20000 (wallclock cap on 1xH100)
+- val_bpb (pre-quant): 1.3474
+- val_bpb (int8+zlib roundtrip): 1.3488
+- Quant degradation: +0.0014 bpb
+- Compressed model size: 12.9 MB
+- Peak memory: 10.3 GiB
