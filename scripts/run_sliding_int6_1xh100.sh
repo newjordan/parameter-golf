@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sliding Window Eval + Int6 QAT — baseline eval on 1xH100
+# Sliding Window Eval + Int6 QAT — eval on 1xH100
 #
-# Three runs back-to-back:
-#   1) Baseline (int8, no sliding window) — control
-#   2) Int6 + QAT only — measure quantization impact
-#   3) Int6 + QAT + sliding window eval (stride=512) — full strategy
+# Two runs back-to-back:
+#   1) Int6 + QAT only — measure quantization impact
+#   2) Int6 + QAT + sliding window eval (stride=512) — full strategy
 #
 # Each run uses the stock 9L/512d model with 10-min wallclock cap.
 
@@ -37,21 +36,9 @@ echo "  Sliding Window + Int6 Eval Suite"
 echo "  Logs: $LOGDIR"
 echo "============================================"
 
-# --- Run 1: Baseline (int8, no sliding window) ---
+# --- Run 1: Int6 + QAT (no sliding window) ---
 echo ""
-echo "[1/3] Baseline: int8, stride=1024 (no overlap)"
-export RUN_ID="baseline_int8"
-export QUANT_BITS=8
-export EVAL_STRIDE=0
-export QAT_START_FRAC=1.0
-
-NCCL_IB_DISABLE=1 \
-torchrun --standalone --nproc_per_node=1 train_gpt.py \
-    2>&1 | tee "$LOGDIR/run1_baseline_int8.log"
-
-# --- Run 2: Int6 + QAT (no sliding window) ---
-echo ""
-echo "[2/3] Int6 + QAT, stride=1024 (no overlap)"
+echo "[1/2] Int6 + QAT, stride=1024 (no overlap)"
 export RUN_ID="int6_qat"
 export QUANT_BITS=6
 export EVAL_STRIDE=0
@@ -59,11 +46,11 @@ export QAT_START_FRAC=0.5
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node=1 train_gpt.py \
-    2>&1 | tee "$LOGDIR/run2_int6_qat.log"
+    2>&1 | tee "$LOGDIR/run1_int6_qat.log"
 
-# --- Run 3: Int6 + QAT + Sliding Window (stride=512) ---
+# --- Run 2: Int6 + QAT + Sliding Window (stride=512) ---
 echo ""
-echo "[3/3] Int6 + QAT + sliding window (stride=512)"
+echo "[2/2] Int6 + QAT + sliding window (stride=512)"
 export RUN_ID="int6_qat_slide512"
 export QUANT_BITS=6
 export EVAL_STRIDE=512
@@ -71,7 +58,7 @@ export QAT_START_FRAC=0.5
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node=1 train_gpt.py \
-    2>&1 | tee "$LOGDIR/run3_int6_slide512.log"
+    2>&1 | tee "$LOGDIR/run2_int6_slide512.log"
 
 # --- Summary ---
 echo ""
@@ -81,8 +68,8 @@ echo "============================================"
 
 for f in "$LOGDIR"/run*.log; do
     name=$(basename "$f" .log)
-    bpb=$(grep -oP 'final_int[68]_ttt_lora val_loss:\S+ val_bpb:\K\S+' "$f" | tail -1)
-    quant_bpb=$(grep -oP 'final_int[68]_zlib_roundtrip val_loss:\S+ val_bpb:\K\S+' "$f" | tail -1)
-    size=$(grep -oP 'Total submission size int[68]\+zlib: \K\d+' "$f" | tail -1)
+    bpb=$(grep -oP 'final_int6_ttt_lora val_loss:\S+ val_bpb:\K\S+' "$f" | tail -1)
+    quant_bpb=$(grep -oP 'final_int6_zlib_roundtrip val_loss:\S+ val_bpb:\K\S+' "$f" | tail -1)
+    size=$(grep -oP 'Total submission size int6\+zlib: \K\d+' "$f" | tail -1)
     echo "$name: ttt_bpb=${bpb:-N/A}  quant_bpb=${quant_bpb:-N/A}  artifact_bytes=${size:-N/A}"
 done | tee "$LOGDIR/summary.txt"
