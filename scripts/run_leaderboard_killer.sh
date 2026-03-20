@@ -4,7 +4,8 @@ set -euo pipefail
 # LEADERBOARD KILLER — optimized for 16MB with FP16 embed
 #
 # Our 1.1693 BPB was real but busted 16MB by 340KB.
-# Fix: shrink MLP from 1536 (3×) to 1344 (~2.625×) to fit FP16 embed.
+# v1: MLP 1344 = 15.58MB, 1.1725 BPB (424KB headroom)
+# v2: MLP 1472 — use the headroom, close gap to 1.1693
 # Then stack SmearGate + BigramHash + OrthoInit on top.
 #
 # Single run — our best shot at the leaderboard.
@@ -32,7 +33,7 @@ mkdir -p "$LOGDIR"
 
 echo "============================================"
 echo "  LEADERBOARD KILLER"
-echo "  MLP 1344 + FP16 embed + SmearGate + BigramHash + OrthoInit"
+echo "  MLP 1472 + FP16 embed + SmearGate + BigramHash + OrthoInit"
 echo "  Target: <1.15 BPB"
 echo "  Logs: $LOGDIR"
 echo "============================================"
@@ -48,7 +49,7 @@ FP16_EMBED=1 \
 SMEAR_GATE=1 \
 BIGRAM_HASH=1 \
 ORTHO_INIT=1 \
-MLP_HIDDEN=1344 \
+MLP_HIDDEN=1472 \
 RUN_ID=killer_fullstack \
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
@@ -59,6 +60,7 @@ echo ""
 echo "============================================"
 echo "  LEADERBOARD KILLER Complete. Results:"
 echo "============================================"
+echo "  Reference: killer v1 MLP1344 = quant_bpb:1.1725 (15.58MB)"
 echo "  Reference: best_shot fp16embed = quant_bpb:1.1693 (16.34MB, over limit)"
 echo "  Target: validated leaderboard #1 = 1.1483"
 echo ""
