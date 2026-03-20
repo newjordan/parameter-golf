@@ -3,11 +3,14 @@ set -euo pipefail
 
 # Sliding Window Eval + Int6 QAT — eval on 1xH100
 #
-# Two runs back-to-back:
+# Three runs back-to-back:
 #   1) Int6 + QAT only — measure quantization impact
 #   2) Int6 + QAT + sliding window eval (stride=512) — full strategy
+#   3) Int6 + QAT + sliding window + MLP 3× — wider FFN, test capacity vs size
+#   4) Int6 + NO QAT + sliding window — pure PTQ baseline, measure QAT benefit
+#   5) Int6 + early QAT (25%) + sliding window — more QAT exposure
 #
-# Each run uses the stock 9L/512d model with 10-min wallclock cap.
+# Each run uses 10-min wallclock cap.
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
@@ -39,7 +42,7 @@ echo "============================================"
 
 # --- Run 1: Int6 + QAT (no sliding window) ---
 echo ""
-echo "[1/2] Int6 + QAT, stride=1024 (no overlap)"
+echo "[1/3] Int6 + QAT, stride=1024 (no overlap)"
 export RUN_ID="int6_qat"
 export QUANT_BITS=6
 export EVAL_STRIDE=0
@@ -51,7 +54,7 @@ torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
 
 # --- Run 2: Int6 + QAT + Sliding Window (stride=512) ---
 echo ""
-echo "[2/2] Int6 + QAT + sliding window (stride=512)"
+echo "[2/3] Int6 + QAT + sliding window (stride=512)"
 export RUN_ID="int6_qat_slide512"
 export QUANT_BITS=6
 export EVAL_STRIDE=512
@@ -60,6 +63,22 @@ export QAT_START_FRAC=0.5
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run2_int6_slide512.log"
+
+# --- Run 3: Int6 + QAT + Sliding Window + MLP 3× ---
+echo ""
+echo "[3/3] Int6 + QAT + sliding window + MLP 3× (wider FFN)"
+export RUN_ID="int6_qat_slide512_mlp3x"
+export QUANT_BITS=6
+export EVAL_STRIDE=512
+export QAT_START_FRAC=0.5
+export MLP_MULT=3
+
+NCCL_IB_DISABLE=1 \
+torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
+    2>&1 | tee "$LOGDIR/run3_int6_slide512_mlp3x.log"
+
+# Reset MLP_MULT for any future runs
+export MLP_MULT=2
 
 # --- Summary ---
 echo ""
