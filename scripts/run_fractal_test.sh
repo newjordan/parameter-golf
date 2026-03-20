@@ -4,7 +4,7 @@ set -euo pipefail
 # Fractal Transformer Isolated Test
 #
 # Four runs testing fractal concept from night one:
-#   1) Fractal only (3×3, 864d) — weight sharing + wider layers
+#   1) Fractal only (3×3, 960d) — weight sharing + wider layers
 #   2) Fractal + Gravity — learned auxiliary losses at loop boundaries
 #   3) Fractal + Gravity + AttnRes — attention over depth
 #   4) Fractal + Gravity + AttnRes + Breathing (full,cheap,full)
@@ -17,8 +17,8 @@ export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.mode
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
 
 # Fractal model: 3 unique layers × 3 loops = 9 effective layers
-# Wider dim (864) since weight sharing compresses well under int6
-export MODEL_DIM="${MODEL_DIM:-864}"
+# Wider dim (960) to fill 16MB budget — weight sharing compresses well under int6
+export MODEL_DIM="${MODEL_DIM:-960}"
 export NUM_HEADS="${NUM_HEADS:-12}"
 export NUM_KV_HEADS="${NUM_KV_HEADS:-4}"
 export MLP_MULT="${MLP_MULT:-2}"
@@ -51,7 +51,7 @@ echo "============================================"
 
 # --- Run 1: Fractal only (no gravity, no attnres) ---
 echo ""
-echo "[1/4] Fractal only — 3×3, 864d, no gravity, no attnres"
+echo "[1/4] Fractal only — 3×3, 960d, no gravity, no attnres"
 export RUN_ID="fractal_only"
 export USE_GRAVITY=0
 export USE_ATTNRES=0
