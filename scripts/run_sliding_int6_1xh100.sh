@@ -7,8 +7,7 @@ set -euo pipefail
 #   1) Int6 + QAT only — measure quantization impact
 #   2) Int6 + QAT + sliding window eval (stride=512) — full strategy
 #   3) Int6 + QAT + sliding window + MLP 3× — wider FFN, test capacity vs size
-#   4) Int6 + NO QAT + sliding window — pure PTQ baseline, measure QAT benefit
-#   5) Int6 + early QAT (25%) + sliding window — more QAT exposure
+#   4) Int6 + QAT + sliding window + 11L/512d — deep config, fill 16MB budget
 #
 # Each run uses 10-min wallclock cap.
 
@@ -42,7 +41,7 @@ echo "============================================"
 
 # --- Run 1: Int6 + QAT (no sliding window) ---
 echo ""
-echo "[1/3] Int6 + QAT, stride=1024 (no overlap)"
+echo "[1/4] Int6 + QAT, stride=1024 (no overlap)"
 export RUN_ID="int6_qat"
 export QUANT_BITS=6
 export EVAL_STRIDE=0
@@ -54,7 +53,7 @@ torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
 
 # --- Run 2: Int6 + QAT + Sliding Window (stride=512) ---
 echo ""
-echo "[2/3] Int6 + QAT + sliding window (stride=512)"
+echo "[2/4] Int6 + QAT + sliding window (stride=512)"
 export RUN_ID="int6_qat_slide512"
 export QUANT_BITS=6
 export EVAL_STRIDE=512
@@ -66,7 +65,7 @@ torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
 
 # --- Run 3: Int6 + QAT + Sliding Window + MLP 3× ---
 echo ""
-echo "[3/3] Int6 + QAT + sliding window + MLP 3× (wider FFN)"
+echo "[3/4] Int6 + QAT + sliding window + MLP 3× (wider FFN)"
 export RUN_ID="int6_qat_slide512_mlp3x"
 export QUANT_BITS=6
 export EVAL_STRIDE=512
@@ -79,6 +78,24 @@ torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
 
 # Reset MLP_MULT for any future runs
 export MLP_MULT=2
+
+# --- Run 4: Int6 + QAT + Sliding Window + 11 Layers (deep config) ---
+echo ""
+echo "[4/4] Int6 + QAT + sliding window + 11L/512d (deep, ~20.7M params)"
+export RUN_ID="int6_qat_slide512_11L"
+export QUANT_BITS=6
+export EVAL_STRIDE=512
+export QAT_START_FRAC=0.5
+export NUM_LAYERS=11
+export MODEL_DIM=512
+export MLP_MULT=2
+
+NCCL_IB_DISABLE=1 \
+torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
+    2>&1 | tee "$LOGDIR/run4_int6_slide512_11L.log"
+
+# Reset to defaults
+export NUM_LAYERS=9
 
 # --- Summary ---
 echo ""
