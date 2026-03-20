@@ -19,13 +19,15 @@ Source: agent-ar.com/leaderboard-param-golf/strategies.html
 
 ### Leaderboard State
 
-| Entry | BPB | Techniques |
-|-------|----:|-----------|
-| Sam Larson (#1) | 1.1574 | Int6 + MLP 3× + Sliding Window |
-| Baseline | 1.2244 | Int8 + MLP 2× + fixed-chunk eval |
+| Entry | BPB | Δ vs Baseline | Techniques |
+|-------|----:|:-------------:|-----------|
+| Bhautik Bavadiya (#1) | 0.9695 | ▼ 0.2549 | Unknown — significantly beyond known techniques |
+| Sam Larson (#2) | 1.1574 | ▼ 0.0670 | Int6 + MLP 3× + Sliding Window |
+| Baseline | 1.2244 | — | Int8 + MLP 2× + fixed-chunk eval |
 
-**Key insight:** The winning formula is `int6 QAT + MLP 3× + sliding window eval`.
-These three techniques combined account for the leader's 0.067 BPB advantage over baseline.
+**Key insight:** Bavadiya's 0.9695 BPB is a **massive** gap (0.1879 BPB ahead of #2).
+The known formula of `int6 QAT + MLP 3× + sliding window eval` only gets to ~1.16.
+Bavadiya must be using additional techniques beyond what's publicly documented.
 
 ---
 
@@ -49,7 +51,7 @@ produce **more effective layers**. Combined with int6 QAT, we can either:
 3. **Both** — int6 buys 2.67× capacity, fractal buys another ~2× via sharing
 
 ```
-LEADERBOARD LEADER (Sam Larson):
+LEADERBOARD LEADER (Bhautik Bavadiya, 0.9695 BPB):
   ~42M params in FP16 → int6 QAT → 16MB artifact
   MLP 3× expansion, standard unique layers
 
@@ -369,10 +371,14 @@ into 16MB than either technique alone.
 | + Sliding window eval | ~1.16 | Medium |
 | + Fractal 3×3 at ~1100d | ~1.14 | Medium-Low |
 | + Gravity + AttnRes | ~1.13 | Low |
-| **Target: beat Sam Larson** | **< 1.1574** | Stretch goal |
+| Target: beat Sam Larson (#2) | < 1.1574 | Achievable |
+| **Target: beat Bavadiya (#1)** | **< 0.9695** | Ambitious stretch goal |
 
 The multiplicative benefit of fractal + int6 is our unique edge.
 No leaderboard entry currently uses weight sharing with int6 QAT.
+
+**Note:** Bavadiya's 0.9695 is far beyond what these techniques alone explain.
+To truly compete for #1, we likely need architectural innovations beyond int6+fractal.
 
 ---
 
