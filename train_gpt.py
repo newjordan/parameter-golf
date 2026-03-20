@@ -73,6 +73,10 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     smear_gate = bool(int(os.environ.get("SMEAR_GATE", "0")))
+    bigram_hash = bool(int(os.environ.get("BIGRAM_HASH", "0")))
+    bigram_buckets = int(os.environ.get("BIGRAM_BUCKETS", 4096))
+    bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
+    ortho_init = bool(int(os.environ.get("ORTHO_INIT", "0")))
 
     # Fractal mode: weight-shared layers with loops, gravity, and AttnRes.
     fractal = bool(int(os.environ.get("FRACTAL", "0")))
@@ -937,6 +941,24 @@ class SmearGate(nn.Module):
         return g * x + (1 - g) * x_prev
 
 
+class BigramHash(nn.Module):
+    """Hash consecutive token pairs into learned embeddings.
+    Gives the model direct bigram context before attention. ~590K params."""
+    def __init__(self, num_buckets: int, hash_dim: int, model_dim: int):
+        super().__init__()
+        self.num_buckets = num_buckets
+        self.table = nn.Embedding(num_buckets, hash_dim)
+        self.proj = CastedLinear(hash_dim, model_dim, bias=False)
+        self.proj._zero_init = True
+        nn.init.normal_(self.table.weight, std=0.01)
+
+    def forward(self, input_ids: Tensor) -> Tensor:
+        bsz, seqlen = input_ids.shape
+        prev_ids = torch.cat([torch.zeros(bsz, 1, dtype=input_ids.dtype, device=input_ids.device), input_ids[:, :-1]], dim=1)
+        h = ((prev_ids.long() * 92821 + input_ids.long()) % self.num_buckets).long()
+        return self.proj(self.table(h))
+
+
 # -----------------------------
 # ATTENTION RESIDUALS (AttnRes)
 # From Moonshot: arxiv:2603.15031
@@ -984,6 +1006,10 @@ class FractalGPT(nn.Module):
         use_attnres: bool = True,
         breath_pattern: list[str] | None = None,
         smear_gate: bool = False,
+        bigram_hash: bool = False,
+        bigram_buckets: int = 4096,
+        bigram_dim: int = 128,
+        ortho_init: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -993,6 +1019,7 @@ class FractalGPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.ortho_init = ortho_init
         self.use_gravity = use_gravity
         self.use_attnres = use_attnres
         if breath_pattern is None:
@@ -1001,6 +1028,7 @@ class FractalGPT(nn.Module):
 
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.smear_gate_mod = SmearGate(model_dim) if smear_gate else None
+        self.bigram_hash_mod = BigramHash(bigram_buckets, bigram_dim, model_dim) if bigram_hash else None
         self.blocks = nn.ModuleList([
             Block(model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
             for _ in range(num_unique_layers)
@@ -1026,8 +1054,11 @@ class FractalGPT(nn.Module):
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
         for module in self.modules():
-            if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
-                nn.init.zeros_(module.weight)
+            if isinstance(module, nn.Linear):
+                if getattr(module, "_zero_init", False):
+                    nn.init.zeros_(module.weight)
+                elif self.ortho_init and module.weight.ndim == 2 and min(module.weight.shape) >= 64:
+                    nn.init.orthogonal_(module.weight, gain=1.0)
 
     def _compute_logits(self, x: Tensor) -> Tensor:
         x = self.final_norm(x).reshape(-1, x.size(-1))
@@ -1039,6 +1070,8 @@ class FractalGPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, reduction: str = "auto") -> Tensor:
         x = self.tok_emb(input_ids)
+        if self.bigram_hash_mod is not None:
+            x = x + self.bigram_hash_mod(input_ids)
         if self.smear_gate_mod is not None:
             x = self.smear_gate_mod(x)
         x = F.rms_norm(x, (x.size(-1),))
@@ -1114,6 +1147,10 @@ class GPT(nn.Module):
         rope_base: float,
         qk_gain_init: float,
         smear_gate: bool = False,
+        bigram_hash: bool = False,
+        bigram_buckets: int = 4096,
+        bigram_dim: int = 128,
+        ortho_init: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -1121,8 +1158,10 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.ortho_init = ortho_init
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.smear_gate = SmearGate(model_dim) if smear_gate else None
+        self.bigram_hash_mod = BigramHash(bigram_buckets, bigram_dim, model_dim) if bigram_hash else None
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -1150,11 +1189,16 @@ class GPT(nn.Module):
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
         for module in self.modules():
-            if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
-                nn.init.zeros_(module.weight)
+            if isinstance(module, nn.Linear):
+                if getattr(module, "_zero_init", False):
+                    nn.init.zeros_(module.weight)
+                elif self.ortho_init and module.weight.ndim == 2 and min(module.weight.shape) >= 64:
+                    nn.init.orthogonal_(module.weight, gain=1.0)
 
     def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, reduction: str = "auto") -> Tensor:
         x = self.tok_emb(input_ids)
+        if self.bigram_hash_mod is not None:
+            x = x + self.bigram_hash_mod(input_ids)
         if self.smear_gate is not None:
             x = self.smear_gate(x)
         x = F.rms_norm(x, (x.size(-1),))
@@ -1521,6 +1565,10 @@ def main() -> None:
             use_attnres=args.use_attnres,
             breath_pattern=args.breath_pattern,
             smear_gate=args.smear_gate,
+            bigram_hash=args.bigram_hash,
+            bigram_buckets=args.bigram_buckets,
+            bigram_dim=args.bigram_dim,
+            ortho_init=args.ortho_init,
         ).to(device).bfloat16()
     else:
         base_model = GPT(
@@ -1536,6 +1584,10 @@ def main() -> None:
             rope_base=args.rope_base,
             qk_gain_init=args.qk_gain_init,
             smear_gate=args.smear_gate,
+            bigram_hash=args.bigram_hash,
+            bigram_buckets=args.bigram_buckets,
+            bigram_dim=args.bigram_dim,
+            ortho_init=args.ortho_init,
         ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1578,6 +1630,11 @@ def main() -> None:
         for arm in base_model.attnres_modules:
             scalar_params.append(arm.query)
             scalar_params.append(arm.prior)
+    # BigramHash: table embedding goes to Adam (like tok_emb), proj is 2D matrix for Muon
+    bigram_mod = getattr(base_model, 'bigram_hash_mod', None)
+    if bigram_mod is not None:
+        scalar_params.append(bigram_mod.table.weight)  # embedding table -> Adam
+        matrix_params.append(bigram_mod.proj.weight)    # projection -> Muon
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
@@ -1627,7 +1684,8 @@ def main() -> None:
     )
     log0(f"seed:{args.seed}")
     log0(f"qat_start_frac:{args.qat_start_frac} quant_bits:{args.quant_bits} eval_stride:{args.eval_stride} "
-         f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} fractal:{args.fractal}")
+         f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} "
+         f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} fractal:{args.fractal}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
