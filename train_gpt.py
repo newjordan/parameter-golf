@@ -56,6 +56,9 @@ class Hyperparameters:
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 0))  # 0 = use train_seq_len (no overlap)
+    quant_bits = int(os.environ.get("QUANT_BITS", 8))  # 6 or 8
+    qat_start_frac = float(os.environ.get("QAT_START_FRAC", 0.5))  # fraction of training to start QAT
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
@@ -284,6 +287,77 @@ def eval_val(
     model.train()
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
+
+def eval_val_sliding(
+    args: Hyperparameters,
+    model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    """Sliding window evaluation: overlapping windows, score only the stride portion."""
+    seq_len = args.train_seq_len
+    stride = args.eval_stride if args.eval_stride > 0 else seq_len
+    if stride > seq_len:
+        stride = seq_len
+
+    total_tokens = val_tokens.numel()
+    # Generate all window start positions
+    window_starts = list(range(0, total_tokens - seq_len, stride))
+    # Distribute windows across ranks
+    rank_starts = window_starts[rank::world_size]
+
+    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    model.eval()
+    with torch.inference_mode():
+        for win_start in rank_starts:
+            # x: [seq_len] input tokens, y: [seq_len] target tokens
+            chunk = val_tokens[win_start : win_start + seq_len + 1].to(
+                device=device, dtype=torch.int64, non_blocking=True
+            )
+            x = chunk[:-1].unsqueeze(0)  # (1, seq_len)
+            y = chunk[1:].unsqueeze(0)   # (1, seq_len)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                per_token_loss = model(x, y, reduction="none").detach()  # (1, seq_len)
+
+            # For the first window, score all tokens; otherwise score only last `stride` tokens
+            if win_start == 0:
+                score_start = 0
+            else:
+                score_start = seq_len - stride
+
+            scored_loss = per_token_loss[0, score_start:]  # (scored_len,)
+            scored_x = x[0, score_start:]
+            scored_y = y[0, score_start:]
+
+            val_loss_sum += scored_loss.to(torch.float64).sum()
+            val_token_count += scored_loss.numel()
+
+            # BPB byte counting for scored tokens only
+            token_bytes = base_bytes_lut[scored_y].to(dtype=torch.int16)
+            token_bytes += (has_leading_space_lut[scored_y] & ~is_boundary_token_lut[scored_x]).to(dtype=torch.int16)
+            val_byte_count += token_bytes.to(torch.float64).sum()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
+
+    val_loss = val_loss_sum / val_token_count
+    bits_per_token = val_loss.item() / math.log(2.0)
+    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    model.train()
+    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
 # -----------------------------
 # POST-TRAINING QUANTIZATION
 # -----------------------------
@@ -430,7 +504,171 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 
 
 # -----------------------------
-# DATA LOADING 
+# INT6 QUANTIZATION + QAT
+# -----------------------------
+#
+# 6-bit quantization maps each weight to one of 64 levels [-31, 31].
+# QAT simulates this during training so weights learn to be robust to discretization.
+# STE (Straight-Through Estimator) passes gradients through the rounding operation.
+
+INT6_LEVELS = 31  # max absolute value for 6-bit signed: [-31, 31], 63 levels + zero = 64
+
+def fake_quantize_int6(w: Tensor) -> Tensor:
+    """STE fake-quantize: quantize in forward, pass gradients straight through."""
+    if w.ndim == 2:
+        scale = w.detach().abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / INT6_LEVELS
+    else:
+        scale = w.detach().abs().amax().clamp_min(1e-8) / INT6_LEVELS
+    w_q = torch.clamp(torch.round(w / scale), -INT6_LEVELS, INT6_LEVELS) * scale
+    # STE: use quantized value in forward, but gradient flows to original w
+    return w + (w_q - w).detach()
+
+def apply_qat_int6(model: nn.Module) -> None:
+    """Register forward pre-hooks that fake-quantize all large float parameters."""
+    hooks = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, (nn.Linear, nn.Embedding)):
+            def _make_hook(param_name="weight"):
+                def hook(module, args):
+                    p = getattr(module, param_name)
+                    if p.requires_grad and p.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
+                        setattr(module, param_name, nn.Parameter(
+                            fake_quantize_int6(p), requires_grad=True
+                        ))
+                return hook
+            h = mod.register_forward_pre_hook(_make_hook())
+            hooks.append(h)
+    model._qat_hooks = hooks
+
+def remove_qat_int6(model: nn.Module) -> None:
+    """Remove QAT hooks."""
+    for h in getattr(model, '_qat_hooks', []):
+        h.remove()
+    model._qat_hooks = []
+
+def pack_int6(values: Tensor) -> Tensor:
+    """Pack int6 values ([-31,31] stored as int8) into bytes: 4 values → 3 bytes."""
+    flat = values.flatten().to(torch.int8)
+    # Pad to multiple of 4
+    pad = (4 - flat.numel() % 4) % 4
+    if pad:
+        flat = torch.cat([flat, torch.zeros(pad, dtype=torch.int8)])
+    flat = flat.to(torch.int32) & 0x3F  # mask to 6 bits (unsigned representation)
+    groups = flat.reshape(-1, 4)
+    b0 = (groups[:, 0] | (groups[:, 1] << 6)).to(torch.uint8)          # bits 0-7: v0[0:6] + v1[0:2]
+    b1 = ((groups[:, 1] >> 2) | (groups[:, 2] << 4)).to(torch.uint8)   # bits 8-15: v1[2:6] + v2[0:4]
+    b2 = ((groups[:, 2] >> 4) | (groups[:, 3] << 2)).to(torch.uint8)   # bits 16-23: v2[4:6] + v3[0:6]
+    return torch.stack([b0, b1, b2], dim=1).flatten()
+
+def unpack_int6(packed: Tensor, numel: int) -> Tensor:
+    """Unpack bytes back to int6 values as int8 tensor."""
+    packed = packed.to(torch.int32)
+    groups = packed.reshape(-1, 3)
+    v0 = groups[:, 0] & 0x3F
+    v1 = ((groups[:, 0] >> 6) | (groups[:, 1] << 2)) & 0x3F
+    v2 = ((groups[:, 1] >> 4) | (groups[:, 2] << 4)) & 0x3F
+    v3 = (groups[:, 2] >> 2) & 0x3F
+    flat = torch.stack([v0, v1, v2, v3], dim=1).flatten()[:numel]
+    # Convert back to signed: values > 31 mean negative (two's complement in 6 bits)
+    flat = torch.where(flat > 31, flat.to(torch.int8) - 64, flat.to(torch.int8))
+    return flat
+
+def quantize_state_dict_int6(state_dict: dict[str, Tensor]):
+    """Quantize state dict to int6 with per-row scales for 2D, per-tensor for others."""
+    quantized: dict[str, Tensor] = {}
+    scales: dict[str, Tensor] = {}
+    dtypes: dict[str, str] = {}
+    passthrough: dict[str, Tensor] = {}
+    passthrough_orig_dtypes: dict[str, str] = {}
+    shapes: dict[str, list[int]] = {}
+    stats = dict.fromkeys(
+        ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors",
+         "baseline_tensor_bytes", "int6_payload_bytes"), 0,
+    )
+
+    for name, tensor in state_dict.items():
+        t = tensor.detach().to("cpu").contiguous()
+        stats["param_count"] += int(t.numel())
+        stats["num_tensors"] += 1
+        stats["baseline_tensor_bytes"] += tensor_nbytes(t)
+
+        if not t.is_floating_point():
+            stats["num_nonfloat_tensors"] += 1
+            passthrough[name] = t
+            stats["int6_payload_bytes"] += tensor_nbytes(t)
+            continue
+
+        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int6_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
+        stats["num_float_tensors"] += 1
+        t32 = t.float()
+        shapes[name] = list(t32.shape)
+        dtypes[name] = str(t.dtype).removeprefix("torch.")
+
+        if t32.ndim == 2:
+            amax = t32.abs().amax(dim=1).clamp_min(1e-8)
+            scale = amax / INT6_LEVELS
+            q = torch.clamp(torch.round(t32 / scale[:, None]), -INT6_LEVELS, INT6_LEVELS).to(torch.int8)
+            packed = pack_int6(q)
+            scales[name] = scale.to(torch.float16).contiguous()
+        else:
+            amax = t32.abs().amax().clamp_min(1e-8)
+            scale = amax / INT6_LEVELS
+            q = torch.clamp(torch.round(t32 / scale), -INT6_LEVELS, INT6_LEVELS).to(torch.int8)
+            packed = pack_int6(q)
+            scales[name] = scale.to(torch.float32).contiguous()
+
+        quantized[name] = packed
+        stats["int6_payload_bytes"] += packed.numel() + tensor_nbytes(scales[name])
+
+    obj: dict[str, object] = {
+        "__quant_format__": "int6_packed_v1",
+        "quantized": quantized,
+        "scales": scales,
+        "dtypes": dtypes,
+        "shapes": shapes,
+        "passthrough": passthrough,
+    }
+    if passthrough_orig_dtypes:
+        obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    return obj, stats
+
+def dequantize_state_dict_int6(obj: dict[str, object]) -> dict[str, Tensor]:
+    """Dequantize int6 state dict back to float."""
+    out: dict[str, Tensor] = {}
+    passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
+
+    for name, packed in obj["quantized"].items():
+        dtype = getattr(torch, obj["dtypes"][name])
+        shape = obj["shapes"][name]
+        numel = 1
+        for s in shape:
+            numel *= s
+        q = unpack_int6(packed, numel).reshape(shape)
+        s = obj["scales"][name]
+
+        if len(shape) == 2:
+            s = s.to(torch.float32)
+            out[name] = (q.float() * s[:, None]).to(dtype=dtype).contiguous()
+        else:
+            scale = float(s.item())
+            out[name] = (q.float() * scale).to(dtype=dtype).contiguous()
+
+    for name, t in obj["passthrough"].items():
+        out_t = t.detach().to("cpu").contiguous()
+        orig_dtype = passthrough_orig_dtypes.get(name)
+        if isinstance(orig_dtype, str):
+            out_t = out_t.to(dtype=getattr(torch, orig_dtype)).contiguous()
+        out[name] = out_t
+    return out
+
+
+# -----------------------------
+# DATA LOADING
 # -----------------------------
 
 def load_data_shard(file: Path) -> Tensor:
@@ -710,7 +948,7 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None) -> Tensor:
+    def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, reduction: str = "auto") -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
@@ -736,11 +974,13 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
         logits = logits + (lora.lm_head_lora(x) if lora else 0)
         logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
-        if lora:
-            bsz, sl, V = logits.shape
+        bsz, sl, V = logits.shape
+        if reduction == "auto":
+            reduction = "none" if lora else "mean"
+        if reduction == "none":
             return F.cross_entropy(
                 logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="none").reshape(bsz, sl)
-        return F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="mean")
+        return F.cross_entropy(logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="mean")
 
 
 # -----------------------------
@@ -1198,6 +1438,10 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
+    qat_active = False
+    qat_start_step = int(args.iterations * args.qat_start_frac) if args.quant_bits == 6 else None
+    if qat_start_step is not None:
+        log0(f"QAT int6 will activate at step {qat_start_step}/{args.iterations}")
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1235,6 +1479,12 @@ def main() -> None:
                     f"step:{step}/{args.iterations}"
                 )
             break
+
+        # Activate QAT at the designated step
+        if qat_start_step is not None and step >= qat_start_step and not qat_active:
+            apply_qat_int6(base_model)
+            qat_active = True
+            log0(f"QAT int6 activated at step {step}")
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
@@ -1294,8 +1544,13 @@ def main() -> None:
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
     # -----------------------------
-    # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
+    # Save the raw state (useful for debugging/loading in PyTorch directly), then produce
+    # the compressed quantized artifact (int6 or int8) and validate the round-tripped weights.
+
+    # Remove QAT hooks before export
+    if qat_active:
+        remove_qat_int6(base_model)
+        qat_active = False
 
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
@@ -1305,50 +1560,61 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    if args.quant_bits == 6:
+        quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict())
+        quant_label = "int6"
+        dequant_fn = dequantize_state_dict_int6
+        payload_key = "int6_payload_bytes"
+    else:
+        quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+        quant_label = "int8"
+        dequant_fn = dequantize_state_dict_int8
+        payload_key = "int8_payload_bytes"
+
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
+    artifact_name = f"final_model.{quant_label}.ptz"
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open(artifact_name, "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize(artifact_name)
         code_bytes = len(code.encode("utf-8"))
-        ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
+        ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats[payload_key], 1)
         log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
-            f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
+            f"Serialized model {quant_label}+zlib: {quant_file_bytes} bytes "
+            f"(payload:{quant_stats[payload_key]} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Total submission size {quant_label}+zlib: {quant_file_bytes + code_bytes} bytes")
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    with open(artifact_name, "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
-    base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
+    base_model.load_state_dict(dequant_fn(quant_state), strict=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
-    q_val_loss, q_val_bpb = eval_val(
-        args,
-        model,
-        rank,
-        world_size,
-        device,
-        grad_accum_steps,
-        val_tokens,
-        base_bytes_lut,
-        has_leading_space_lut,
-        is_boundary_token_lut,
-    )
+    stride = args.eval_stride if args.eval_stride > 0 else args.train_seq_len
+    if stride < args.train_seq_len:
+        q_val_loss, q_val_bpb = eval_val_sliding(
+            args, model, rank, world_size, device,
+            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        )
+    else:
+        q_val_loss, q_val_bpb = eval_val(
+            args, model, rank, world_size, device, grad_accum_steps,
+            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        )
     torch.cuda.synchronize()
     log0(
-        f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+        f"final_{quant_label}_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
+        f" eval_stride:{stride}"
     )
-    log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    log0(f"final_{quant_label}_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
     # LoRA test-time training evaluation (the competition score)
     torch._dynamo.reset()
@@ -1360,7 +1626,7 @@ def main() -> None:
     )
     torch.cuda.synchronize()
     log0(
-        f"final_int8_ttt_lora val_loss:{ttt_val_loss:.4f} val_bpb:{ttt_val_bpb:.4f} "
+        f"final_{quant_label}_ttt_lora val_loss:{ttt_val_loss:.4f} val_bpb:{ttt_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms"
     )
 
