@@ -48,6 +48,7 @@ echo "[1/3] Early QAT (25%) + slide512"
 export RUN_ID="mlp3x_earlyqat_slide512"
 export QAT_START_FRAC=0.25
 export EVAL_STRIDE=512
+echo "DEBUG: QAT_START_FRAC=$QAT_START_FRAC EVAL_STRIDE=$EVAL_STRIDE"
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
@@ -59,6 +60,7 @@ echo "[2/3] Standard QAT (50%) + slide256"
 export RUN_ID="mlp3x_qat50_slide256"
 export QAT_START_FRAC=0.5
 export EVAL_STRIDE=256
+echo "DEBUG: QAT_START_FRAC=$QAT_START_FRAC EVAL_STRIDE=$EVAL_STRIDE"
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
@@ -70,6 +72,7 @@ echo "[3/3] Early QAT (25%) + slide256 — both combined"
 export RUN_ID="mlp3x_earlyqat_slide256"
 export QAT_START_FRAC=0.25
 export EVAL_STRIDE=256
+echo "DEBUG: QAT_START_FRAC=$QAT_START_FRAC EVAL_STRIDE=$EVAL_STRIDE"
 
 NCCL_IB_DISABLE=1 \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \

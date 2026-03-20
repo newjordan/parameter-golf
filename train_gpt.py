@@ -1626,6 +1626,8 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+    log0(f"qat_start_frac:{args.qat_start_frac} quant_bits:{args.quant_bits} eval_stride:{args.eval_stride} "
+         f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} fractal:{args.fractal}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
