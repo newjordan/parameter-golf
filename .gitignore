@@ -6,6 +6,8 @@ modded-nanogpt
 data/datasets
 data/manifest.json
 data/docs_selected.jsonl
+data/docs_selected.source_manifest.json
+data/tokenizer_config.export.json
 .mypy_cache/
 .venv
 logs/
