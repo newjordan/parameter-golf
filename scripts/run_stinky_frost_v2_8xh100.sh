@@ -12,6 +12,7 @@ set -euo pipefail
 #   - QAT at 25%
 #   - XSA last 3 layers (arXiv:2603.09078, +0.002 BPB)
 #   - 3% magnitude pruning
+#   - TTT SGD 3 epochs (matching #254: lr=0.002, momentum=0.9, freeze first 2 blocks)
 #   - NO seq ramp (unproven, causes DDP issues)
 #
 # Target: 1.13-1.14 BPB
@@ -50,6 +51,7 @@ MUON_WD=0.04 \
 SWA_EVERY=50 SWA_START_FRAC=0.4 \
 USE_ZSTD=1 ZSTD_LEVEL=22 PRUNE_PCT=0.03 \
 XSA_LAST_N=3 \
+TTT_OPTIMIZER=sgd TTT_LORA_LR=0.002 TTT_EPOCHS=3 TTT_MOMENTUM=0.9 TTT_FREEZE_FIRST_N=2 \
 NCCL_IB_DISABLE=1 RUN_ID=stinky_frost_v2_prod \
 torchrun --standalone --nproc_per_node="${NPROC:-8}" train_gpt.py \
     2>&1 | tee "$LOGDIR/run1_v2_prod.log"

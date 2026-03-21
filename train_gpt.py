@@ -127,6 +127,10 @@ class Hyperparameters:
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 256))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 1024))
     ttt_batch_size = int(os.environ.get("TTT_BATCH_SIZE", 64))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 1))  # number of TTT passes per document
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adam")  # "adam" or "sgd"
+    ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))  # SGD momentum
+    ttt_freeze_first_n = int(os.environ.get("TTT_FREEZE_FIRST_N", 0))  # freeze first N blocks' LoRA
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -1476,16 +1480,23 @@ class BatchedLinearLoRA(nn.Module):
 
 class BatchedTTTLoRA(nn.Module):
     """All LoRA adapters for one batch: LM head and Q/V per block."""
-    def __init__(self, bsz: int, model: GPT, rank: int):
+    def __init__(self, bsz: int, model: GPT, rank: int, freeze_first_n: int = 0):
         super().__init__()
         dim = model.tok_emb.embedding_dim
         vocab = model.tok_emb.num_embeddings
         self.lm_head_lora = BatchedLinearLoRA(bsz, dim, vocab, rank)
         self.q_loras = nn.ModuleList()
         self.v_loras = nn.ModuleList()
-        for block in model.blocks:
+        for i, block in enumerate(model.blocks):
             self.q_loras.append(BatchedLinearLoRA(bsz, dim, block.attn.c_q.weight.shape[0], rank))
             self.v_loras.append(BatchedLinearLoRA(bsz, dim, block.attn.c_v.weight.shape[0], rank))
+        # Freeze first N blocks' LoRA (they don't adapt during TTT)
+        if freeze_first_n > 0:
+            for i in range(min(freeze_first_n, len(self.q_loras))):
+                for p in self.q_loras[i].parameters():
+                    p.requires_grad_(False)
+                for p in self.v_loras[i].parameters():
+                    p.requires_grad_(False)
 
     def reset(self) -> None:
         for m in self.modules():
@@ -1498,11 +1509,16 @@ def _reset_ttt_optimizer(opt):
             s = opt.state.get(p)
             if not s:   # Fresh state.
                 continue
-            s['exp_avg'].zero_()
-            s['exp_avg_sq'].zero_()
-            s['step'].fill_(0)
+            if 'exp_avg' in s:  # Adam
+                s['exp_avg'].zero_()
+                s['exp_avg_sq'].zero_()
+                s['step'].fill_(0)
+            if 'momentum_buffer' in s:  # SGD
+                s['momentum_buffer'].zero_()
 
 def _build_ttt_optimizer(lora, args: Hyperparameters):
+    if args.ttt_optimizer == "sgd":
+        return torch.optim.SGD(lora.parameters(), lr=args.ttt_lora_lr, momentum=args.ttt_momentum)
     return torch.optim.Adam(lora.parameters(), lr=args.ttt_lora_lr, betas=(args.beta1, args.beta2), eps=1e-10)
 
 def _find_docs(all_tokens: Tensor, include_next_bos: bool = True) -> list[tuple[int, int]]:
@@ -1577,7 +1593,7 @@ def eval_val_ttt_lora(
     for p in base_model.parameters():
         p.requires_grad_(False)
 
-    lora = BatchedTTTLoRA(batch_size, base_model, lora_rank).to(device)
+    lora = BatchedTTTLoRA(batch_size, base_model, lora_rank, args.ttt_freeze_first_n).to(device)
     opt = _build_ttt_optimizer(lora, args)
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
@@ -1593,13 +1609,45 @@ def eval_val_ttt_lora(
             cur_lora.reset()
             _reset_ttt_optimizer(cur_opt)
         else:
-            cur_lora = BatchedTTTLoRA(bsz, base_model, lora_rank).to(device)
+            cur_lora = BatchedTTTLoRA(bsz, base_model, lora_rank, args.ttt_freeze_first_n).to(device)
             cur_opt = _build_ttt_optimizer(cur_lora, args)
 
         pred_lens = [doc_len - 1 for _, doc_len in batch]
         num_chunks = [(pl + chunk_size - 1) // chunk_size for pl in pred_lens]
         max_nc = max(num_chunks)
 
+        # Multi-epoch TTT: do (ttt_epochs - 1) training-only passes, then 1 score+train pass
+        ttt_epochs = args.ttt_epochs
+
+        # Extra training epochs (no scoring)
+        for epoch in range(ttt_epochs - 1):
+            for ci in range(max_nc):
+                needs_train = any(ci < nc - 1 for nc in num_chunks)
+                if not needs_train:
+                    continue
+                chunk_stats = _compute_chunk_window(ci, (ci + 1) * chunk_size, ci + 1, chunk_size, eval_seq_len)
+                context_size, chunk_offset = chunk_stats[1], chunk_stats[2]
+                active = [ci < nc for nc in num_chunks]
+                x = torch.zeros(bsz, context_size, dtype=torch.int64, device=device)
+                y = torch.zeros(bsz, context_size, dtype=torch.int64, device=device)
+                for b in range(bsz):
+                    if not active[b]:
+                        continue
+                    ds, dl = batch[b]
+                    ws, wl, co, cl = _compute_chunk_window(ci, pred_lens[b], num_chunks[b], chunk_size, eval_seq_len)
+                    chunk = all_tokens[ds + ws: ds + ws + wl + 1]
+                    toks = chunk.to(dtype=torch.int64, device=device)
+                    x[b, :wl] = toks[:-1]
+                    y[b, :wl] = toks[1:]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    ptl = base_model(x, y, lora=cur_lora)
+                mask = torch.tensor([float(ci < num_chunks[b] - 1) for b in range(bsz)], device=device)
+                per_doc = ptl[:, chunk_offset:chunk_offset + chunk_size].mean(dim=-1)
+                cur_opt.zero_grad()
+                (per_doc * mask).sum().backward()
+                cur_opt.step()
+
+        # Final epoch: score + train (original loop)
         for ci in range(max_nc):
             chunk_stats = _compute_chunk_window(ci, (ci + 1) * chunk_size, ci + 1, chunk_size, eval_seq_len)
             context_size, chunk_offset = chunk_stats[1], chunk_stats[2]
@@ -1640,7 +1688,7 @@ def eval_val_ttt_lora(
                         ptl, x, y, b, co, cl, base_bytes_lut, has_leading_space_lut,
                         is_boundary_token_lut, loss_sum, byte_sum, token_count)
 
-            # Train: one Adam step on the LoRA params using this chunk's loss
+            # Train: one optimizer step on the LoRA params using this chunk's loss
             if needs_train:
                 mask = torch.tensor([float(ci < num_chunks[b] - 1) for b in range(bsz)], device=device)
                 per_doc = ptl[:, chunk_offset:chunk_offset + chunk_size].mean(dim=-1)
