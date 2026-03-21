@@ -103,6 +103,7 @@ class Hyperparameters:
     # Sequence length ramp: start with short sequences for faster early training
     seq_ramp_start = int(os.environ.get("SEQ_RAMP_START", 0))  # initial seq len (0=disabled)
     seq_ramp_frac = float(os.environ.get("SEQ_RAMP_FRAC", 0.25))  # fraction of training at short seq
+    xsa_last_n = int(os.environ.get("XSA_LAST_N", 0))  # apply XSA to last N layers (0=disabled)
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -1023,6 +1024,7 @@ class CausalSelfAttention(nn.Module):
         num_kv_heads: int,
         rope_base: float,
         qk_gain_init: float,
+        use_xsa: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -1032,6 +1034,7 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = dim // num_heads
+        self.use_xsa = use_xsa
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
@@ -1065,6 +1068,18 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
+        # XSA: Exclusive Self Attention — subtract self-attention projection
+        # Removes self-bias from attention output (arXiv:2603.09078)
+        # GQA-aware: reshape to groups to avoid memory duplication
+        if self.use_xsa:
+            group_size = self.num_heads // self.num_kv_heads
+            # y: [B, H, T, D] — reshape into GQA groups
+            y_grouped = y.reshape(bsz, self.num_kv_heads, group_size, seqlen, self.head_dim)
+            # v: [B, Hkv, T, D] — normalize and add group dim
+            vn = F.normalize(v, dim=-1).unsqueeze(2)  # [B, Hkv, 1, T, D]
+            # Subtract projection of y onto its own value vector
+            dot = (y_grouped * vn).sum(dim=-1, keepdim=True)
+            y = (y_grouped - dot * vn).reshape(bsz, self.num_heads, seqlen, self.head_dim)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -1093,11 +1108,12 @@ class Block(nn.Module):
         rope_base: float,
         qk_gain_init: float,
         mlp_hidden: int = 0,
+        use_xsa: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init, use_xsa=use_xsa)
         self.mlp = MLP(dim, mlp_mult, mlp_hidden)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -1344,6 +1360,7 @@ class GPT(nn.Module):
         bigram_buckets: int = 4096,
         bigram_dim: int = 128,
         ortho_init: bool = False,
+        xsa_last_n: int = 0,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -1369,6 +1386,7 @@ class GPT(nn.Module):
                     rope_base,
                     qk_gain_init,
                     mlp_hidden,
+                    use_xsa=(i >= num_layers - xsa_last_n) if xsa_last_n > 0 else False,
                 )
                 for i in range(num_layers)
             ]
@@ -1784,6 +1802,7 @@ def main() -> None:
             bigram_buckets=args.bigram_buckets,
             bigram_dim=args.bigram_dim,
             ortho_init=args.ortho_init,
+            xsa_last_n=args.xsa_last_n,
         ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1883,7 +1902,7 @@ def main() -> None:
          f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} "
          f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} fractal:{args.fractal} "
          f"int5_mlp:{args.int5_mlp} use_zstd:{args.use_zstd} prune_pct:{args.prune_pct} "
-         f"seq_ramp_start:{args.seq_ramp_start}")
+         f"seq_ramp_start:{args.seq_ramp_start} xsa_last_n:{args.xsa_last_n}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
