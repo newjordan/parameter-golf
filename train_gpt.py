@@ -1652,11 +1652,9 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    # Seq ramp changes tensor shapes mid-training — torch.compile can't handle this reliably.
-    # Skip compilation entirely when seq ramp is active. ~5-10% slower per step but stable.
     if args.seq_ramp_start > 0:
-        compiled_model = base_model  # no torch.compile
-        log0("torch.compile DISABLED (seq ramp active — dynamic shapes)")
+        compiled_model = torch.compile(base_model, dynamic=True)
+        log0("torch.compile dynamic=True (seq ramp active — variable shapes)")
     else:
         compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     if distributed:
