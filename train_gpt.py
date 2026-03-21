@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 import zlib
+import zstandard
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +96,13 @@ class Hyperparameters:
     fp16_embed = bool(int(os.environ.get("FP16_EMBED", "0")))  # keep embeddings in fp16 instead of int6
     swa_every = int(os.environ.get("SWA_EVERY", 0))  # SWA checkpoint interval (0=disabled)
     swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))  # fraction of training to start SWA
+    use_zstd = bool(int(os.environ.get("USE_ZSTD", "0")))  # use zstd instead of zlib
+    zstd_level = int(os.environ.get("ZSTD_LEVEL", 22))  # zstd compression level
+    int5_mlp = bool(int(os.environ.get("INT5_MLP", "0")))  # int5 for MLP weights, int6 for rest
+    prune_pct = float(os.environ.get("PRUNE_PCT", 0.0))  # magnitude pruning percentage (e.g. 0.03)
+    # Sequence length ramp: start with short sequences for faster early training
+    seq_ramp_start = int(os.environ.get("SEQ_RAMP_START", 0))  # initial seq len (0=disabled)
+    seq_ramp_frac = float(os.environ.get("SEQ_RAMP_FRAC", 0.25))  # fraction of training at short seq
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -549,20 +557,23 @@ def fake_quantize_int6(w: Tensor) -> Tensor:
     # STE: use quantized value in forward, but gradient flows to original w
     return w + (w_q - w).detach()
 
-def apply_qat_int6(model: nn.Module) -> None:
-    """Register forward pre-hooks that fake-quantize all large float parameters."""
+def apply_qat_int6(model: nn.Module, int5_mlp: bool = False) -> None:
+    """Register forward pre-hooks that fake-quantize all large float parameters.
+    If int5_mlp=True, MLP fc/proj weights use int5, rest use int6."""
     hooks = []
     for name, mod in model.named_modules():
         if isinstance(mod, (nn.Linear, nn.Embedding)):
-            def _make_hook(param_name="weight"):
+            # Determine if this is an MLP weight
+            is_mlp = ".mlp." in name or (hasattr(mod, '_zero_init') and ".mlp." in name)
+            def _make_hook(param_name="weight", use_int5=False):
                 def hook(module, args):
                     p = getattr(module, param_name)
                     if p.requires_grad and p.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
-                        setattr(module, param_name, nn.Parameter(
-                            fake_quantize_int6(p), requires_grad=True
-                        ))
+                        fq = fake_quantize_int5(p) if use_int5 else fake_quantize_int6(p)
+                        setattr(module, param_name, nn.Parameter(fq, requires_grad=True))
                 return hook
-            h = mod.register_forward_pre_hook(_make_hook())
+            use_int5_for_this = int5_mlp and is_mlp
+            h = mod.register_forward_pre_hook(_make_hook(use_int5=use_int5_for_this))
             hooks.append(h)
     model._qat_hooks = hooks
 
@@ -672,6 +683,177 @@ def quantize_state_dict_int6(state_dict: dict[str, Tensor], fp16_embed_keys: lis
     if passthrough_orig_dtypes:
         obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
     return obj, stats
+
+# -----------------------------
+# INT5 QUANTIZATION (for MLP weights)
+# -----------------------------
+# 5-bit quantization: [-16, 15], 32 levels. Stored as int8 with 3 zero high bits.
+# zstd-22 compresses the zero-padded bytes at ~1.88x, better than raw int6 packing.
+
+INT5_LEVELS = 15  # max absolute value for 5-bit signed: [-16, 15]
+
+def fake_quantize_int5(w: Tensor) -> Tensor:
+    """STE fake-quantize for int5."""
+    if w.ndim == 2:
+        scale = w.detach().abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / INT5_LEVELS
+    else:
+        scale = w.detach().abs().amax().clamp_min(1e-8) / INT5_LEVELS
+    w_q = torch.clamp(torch.round(w / scale), -16, INT5_LEVELS) * scale
+    return w + (w_q - w).detach()
+
+def quantize_tensor_int5(t32: Tensor):
+    """Quantize a tensor to int5 stored as int8 (3 zero high bits for zstd compression)."""
+    if t32.ndim == 2:
+        amax = t32.abs().amax(dim=1).clamp_min(1e-8)
+        scale = amax / INT5_LEVELS
+        q = torch.clamp(torch.round(t32 / scale[:, None]), -16, INT5_LEVELS).to(torch.int8)
+        return q, scale.to(torch.float16).contiguous()
+    else:
+        amax = t32.abs().amax().clamp_min(1e-8)
+        scale = amax / INT5_LEVELS
+        q = torch.clamp(torch.round(t32 / scale), -16, INT5_LEVELS).to(torch.int8)
+        return q, scale.to(torch.float32).contiguous()
+
+def quantize_state_dict_int6_mixed(state_dict: dict[str, Tensor],
+                                    fp16_embed_keys: list[str] | None = None,
+                                    int5_key_patterns: list[str] | None = None,
+                                    prune_pct: float = 0.0):
+    """Mixed int5/int6 quantization. int5 for MLP weights (better zstd compression),
+    int6 for attention weights. Optional magnitude pruning before quantization."""
+    quantized: dict[str, Tensor] = {}
+    scales: dict[str, Tensor] = {}
+    dtypes: dict[str, str] = {}
+    passthrough: dict[str, Tensor] = {}
+    passthrough_orig_dtypes: dict[str, str] = {}
+    shapes: dict[str, list[int]] = {}
+    quant_bits_map: dict[str, int] = {}  # track which bit width per tensor
+    fp16_embed_keys = fp16_embed_keys or []
+    int5_key_patterns = int5_key_patterns or []
+    stats = dict.fromkeys(
+        ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors",
+         "baseline_tensor_bytes", "int6_payload_bytes", "int5_count", "int6_count"), 0,
+    )
+
+    # Magnitude pruning: zero out smallest weights
+    if prune_pct > 0:
+        for name, tensor in state_dict.items():
+            if tensor.is_floating_point() and tensor.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
+                if name not in fp16_embed_keys:
+                    threshold = torch.quantile(tensor.detach().abs().float().flatten(), prune_pct)
+                    mask = tensor.detach().abs() < threshold
+                    tensor.data[mask] = 0.0
+
+    for name, tensor in state_dict.items():
+        t = tensor.detach().to("cpu").contiguous()
+        stats["param_count"] += int(t.numel())
+        stats["num_tensors"] += 1
+        stats["baseline_tensor_bytes"] += tensor_nbytes(t)
+
+        if not t.is_floating_point():
+            stats["num_nonfloat_tensors"] += 1
+            passthrough[name] = t
+            stats["int6_payload_bytes"] += tensor_nbytes(t)
+            continue
+
+        if name in fp16_embed_keys:
+            kept = t.to(torch.float16).contiguous()
+            passthrough[name] = kept
+            passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
+            stats["int6_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
+        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int6_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
+        stats["num_float_tensors"] += 1
+        t32 = t.float()
+        shapes[name] = list(t32.shape)
+        dtypes[name] = str(t.dtype).removeprefix("torch.")
+
+        # Decide int5 vs int6 based on key patterns
+        use_int5 = any(pat in name for pat in int5_key_patterns)
+
+        if use_int5:
+            q, scale = quantize_tensor_int5(t32)
+            # Store as raw int8 (not packed) — zstd compresses the zero high bits well
+            quantized[name] = q.contiguous()
+            scales[name] = scale
+            quant_bits_map[name] = 5
+            stats["int5_count"] += 1
+            stats["int6_payload_bytes"] += q.numel() + tensor_nbytes(scale)
+        else:
+            if t32.ndim == 2:
+                amax = t32.abs().amax(dim=1).clamp_min(1e-8)
+                scale = amax / INT6_LEVELS
+                q = torch.clamp(torch.round(t32 / scale[:, None]), -INT6_LEVELS, INT6_LEVELS).to(torch.int8)
+                packed = pack_int6(q)
+                scales[name] = scale.to(torch.float16).contiguous()
+            else:
+                amax = t32.abs().amax().clamp_min(1e-8)
+                scale = amax / INT6_LEVELS
+                q = torch.clamp(torch.round(t32 / scale), -INT6_LEVELS, INT6_LEVELS).to(torch.int8)
+                packed = pack_int6(q)
+                scales[name] = scale.to(torch.float32).contiguous()
+            quantized[name] = packed
+            quant_bits_map[name] = 6
+            stats["int6_count"] += 1
+            stats["int6_payload_bytes"] += packed.numel() + tensor_nbytes(scales[name])
+
+    obj: dict[str, object] = {
+        "__quant_format__": "int6_int5_mixed_v1",
+        "quantized": quantized,
+        "scales": scales,
+        "dtypes": dtypes,
+        "shapes": shapes,
+        "quant_bits_map": quant_bits_map,
+        "passthrough": passthrough,
+    }
+    if passthrough_orig_dtypes:
+        obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    return obj, stats
+
+def dequantize_state_dict_int6_mixed(obj: dict[str, object]) -> dict[str, Tensor]:
+    """Dequantize mixed int5/int6 state dict back to float."""
+    out: dict[str, Tensor] = {}
+    passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
+    quant_bits_map = obj.get("quant_bits_map", {})
+
+    for name, data in obj["quantized"].items():
+        dtype = getattr(torch, obj["dtypes"][name])
+        shape = obj["shapes"][name]
+        numel = 1
+        for s in shape:
+            numel *= s
+        s = obj["scales"][name]
+        bits = quant_bits_map.get(name, 6)
+
+        if bits == 5:
+            # int5: stored as raw int8, just reshape and dequantize
+            q = data.reshape(shape)
+            if len(shape) == 2:
+                out[name] = (q.float() * s.to(torch.float32)[:, None]).to(dtype=dtype).contiguous()
+            else:
+                scale = float(s.item())
+                out[name] = (q.float() * scale).to(dtype=dtype).contiguous()
+        else:
+            # int6: packed, unpack first
+            q = unpack_int6(data, numel).reshape(shape)
+            if len(shape) == 2:
+                out[name] = (q.float() * s.to(torch.float32)[:, None]).to(dtype=dtype).contiguous()
+            else:
+                scale = float(s.item())
+                out[name] = (q.float() * scale).to(dtype=dtype).contiguous()
+
+    for name, t in obj["passthrough"].items():
+        out_t = t.detach().to("cpu").contiguous()
+        orig_dtype = passthrough_orig_dtypes.get(name)
+        if isinstance(orig_dtype, str):
+            out_t = out_t.to(dtype=getattr(torch, orig_dtype)).contiguous()
+        out[name] = out_t
+    return out
 
 def dequantize_state_dict_int6(obj: dict[str, object]) -> dict[str, Tensor]:
     """Dequantize int6 state dict back to float."""
@@ -1699,7 +1881,9 @@ def main() -> None:
     log0(f"seed:{args.seed}")
     log0(f"qat_start_frac:{args.qat_start_frac} quant_bits:{args.quant_bits} eval_stride:{args.eval_stride} "
          f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} "
-         f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} fractal:{args.fractal}")
+         f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} fractal:{args.fractal} "
+         f"int5_mlp:{args.int5_mlp} use_zstd:{args.use_zstd} prune_pct:{args.prune_pct} "
+         f"seq_ramp_start:{args.seq_ramp_start}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1770,6 +1954,14 @@ def main() -> None:
     if swa_start_step is not None:
         log0(f"SWA will start at step {swa_start_step}, every {args.swa_every} steps")
 
+    # Sequence length ramp: start short, ramp to full
+    seq_ramp_step: int | None = None
+    current_seq_len = args.train_seq_len
+    if args.seq_ramp_start > 0:
+        current_seq_len = args.seq_ramp_start
+        seq_ramp_step = int(args.iterations * args.seq_ramp_frac)
+        log0(f"Seq ramp: start={args.seq_ramp_start}, ramp to {args.train_seq_len} at step {seq_ramp_step}")
+
     # Progressive loop unrolling schedule
     loop_thresholds: list[int] = []
     if args.loop_schedule and args.fractal and hasattr(base_model, 'active_loops'):
@@ -1817,9 +2009,14 @@ def main() -> None:
 
         # Activate QAT at the designated step
         if qat_start_step is not None and step >= qat_start_step and not qat_active:
-            apply_qat_int6(base_model)
+            apply_qat_int6(base_model, int5_mlp=args.int5_mlp)
             qat_active = True
-            log0(f"QAT int6 activated at step {step}")
+            log0(f"QAT {'int5-MLP/int6' if args.int5_mlp else 'int6'} activated at step {step}")
+
+        # Sequence length ramp
+        if seq_ramp_step is not None and step >= seq_ramp_step and current_seq_len != args.train_seq_len:
+            current_seq_len = args.train_seq_len
+            log0(f"Seq ramp: switching to full seq_len={args.train_seq_len} at step {step}")
 
         # Progressive loop unrolling for fractal
         if loop_thresholds and hasattr(base_model, 'active_loops'):
@@ -1836,7 +2033,7 @@ def main() -> None:
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+            x, y = train_loader.next_batch(args.train_batch_tokens, current_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
@@ -1919,7 +2116,18 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    if args.quant_bits == 6:
+    if args.quant_bits == 6 and args.int5_mlp:
+        fp16_keys = ["tok_emb.weight"] if args.fp16_embed else []
+        int5_patterns = [".mlp.fc.", ".mlp.proj."]
+        quant_obj, quant_stats = quantize_state_dict_int6_mixed(
+            base_model.state_dict(), fp16_embed_keys=fp16_keys,
+            int5_key_patterns=int5_patterns, prune_pct=args.prune_pct)
+        quant_label = "int5int6"
+        dequant_fn = dequantize_state_dict_int6_mixed
+        payload_key = "int6_payload_bytes"
+        log0(f"Mixed quant: {quant_stats.get('int5_count',0)} int5 tensors, "
+             f"{quant_stats.get('int6_count',0)} int6 tensors, prune_pct={args.prune_pct}")
+    elif args.quant_bits == 6:
         fp16_keys = ["tok_emb.weight"] if args.fp16_embed else []
         quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict(), fp16_embed_keys=fp16_keys)
         quant_label = "int6"
@@ -1934,7 +2142,13 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
+    if args.use_zstd:
+        cctx = zstandard.ZstdCompressor(level=args.zstd_level)
+        quant_blob = cctx.compress(quant_raw)
+        compress_label = f"zstd{args.zstd_level}"
+    else:
+        quant_blob = zlib.compress(quant_raw, level=9)
+        compress_label = "zlib"
     quant_raw_bytes = len(quant_raw)
     artifact_name = f"final_model.{quant_label}.ptz"
     if master_process:
@@ -1944,16 +2158,21 @@ def main() -> None:
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats[payload_key], 1)
         log0(
-            f"Serialized model {quant_label}+zlib: {quant_file_bytes} bytes "
+            f"Serialized model {quant_label}+{compress_label}: {quant_file_bytes} bytes "
             f"(payload:{quant_stats[payload_key]} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size {quant_label}+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Total submission size {quant_label}+{compress_label}: {quant_file_bytes + code_bytes} bytes")
 
     if distributed:
         dist.barrier()
     with open(artifact_name, "rb") as f:
         quant_blob_disk = f.read()
-    quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
+    if args.use_zstd:
+        dctx = zstandard.ZstdDecompressor()
+        quant_decompressed = dctx.decompress(quant_blob_disk, max_output_size=len(quant_raw) * 2)
+    else:
+        quant_decompressed = zlib.decompress(quant_blob_disk)
+    quant_state = torch.load(io.BytesIO(quant_decompressed), map_location="cpu")
     base_model.load_state_dict(dequant_fn(quant_state), strict=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
