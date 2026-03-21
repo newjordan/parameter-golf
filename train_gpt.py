@@ -1652,11 +1652,7 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    if args.seq_ramp_start > 0:
-        compiled_model = torch.compile(base_model, dynamic=True)
-        log0("torch.compile dynamic=True (seq ramp active — variable shapes)")
-    else:
-        compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     if distributed:
         model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
     else:
