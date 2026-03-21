@@ -1811,8 +1811,15 @@ def main() -> None:
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
     use_fullgraph = not args.fractal and args.seq_ramp_start == 0  # dynamic shapes break fullgraph
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=use_fullgraph)
-    model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+    use_dynamic = args.seq_ramp_start > 0  # enable dynamic shapes for seq ramp
+    compiled_model = torch.compile(base_model, dynamic=use_dynamic, fullgraph=use_fullgraph)
+    if distributed:
+        ddp_kwargs: dict = dict(device_ids=[local_rank], broadcast_buffers=False)
+        if args.seq_ramp_start > 0:
+            ddp_kwargs["find_unused_parameters"] = True
+        model: nn.Module = DDP(compiled_model, **ddp_kwargs)
+    else:
+        model = compiled_model
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -2035,6 +2042,7 @@ def main() -> None:
         # Sequence length ramp
         if seq_ramp_step is not None and step >= seq_ramp_step and current_seq_len != args.train_seq_len:
             current_seq_len = args.train_seq_len
+            torch._dynamo.reset()  # clear compiled graphs for new seq length
             log0(f"Seq ramp: switching to full seq_len={args.train_seq_len} at step {step}")
 
         # Progressive loop unrolling for fractal
