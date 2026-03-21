@@ -1810,7 +1810,7 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    use_fullgraph = not args.fractal  # fractal has dynamic list ops
+    use_fullgraph = not args.fractal and args.seq_ramp_start == 0  # dynamic shapes break fullgraph
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=use_fullgraph)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
