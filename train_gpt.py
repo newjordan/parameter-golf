@@ -94,6 +94,8 @@ class Hyperparameters:
     seq_ramp_start = int(os.environ.get("SEQ_RAMP_START", 0))  # initial seq len (0=disabled)
     seq_ramp_frac = float(os.environ.get("SEQ_RAMP_FRAC", 0.25))  # fraction of training at short seq
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 0))  # apply XSA to last N layers (0=disabled)
+    batch_ramp_start = int(os.environ.get("BATCH_RAMP_START", 0))  # initial batch tokens (0=disabled)
+    batch_ramp_frac = float(os.environ.get("BATCH_RAMP_FRAC", 0.25))  # fraction of training to ramp batch
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -1819,6 +1821,14 @@ def main() -> None:
         seq_ramp_step = int(args.iterations * args.seq_ramp_frac)
         log0(f"Seq ramp: start={args.seq_ramp_start}, ramp to {args.train_seq_len} at step {seq_ramp_step}")
 
+    # Batch size ramp: start small for more gradient updates, ramp to full
+    batch_ramp_end_step: int | None = None
+    current_batch_tokens = args.train_batch_tokens
+    if args.batch_ramp_start > 0:
+        current_batch_tokens = args.batch_ramp_start
+        batch_ramp_end_step = int(args.iterations * args.batch_ramp_frac)
+        log0(f"Batch ramp: start={args.batch_ramp_start}, ramp to {args.train_batch_tokens} at step {batch_ramp_end_step}")
+
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -1870,6 +1880,16 @@ def main() -> None:
             torch._dynamo.reset()  # clear compiled graphs for new seq length
             log0(f"Seq ramp: switching to full seq_len={args.train_seq_len} at step {step}")
 
+        # Batch size ramp: linear interpolation from start to full
+        if batch_ramp_end_step is not None and step < batch_ramp_end_step:
+            frac = step / batch_ramp_end_step
+            raw = args.batch_ramp_start + frac * (args.train_batch_tokens - args.batch_ramp_start)
+            # Round down to nearest multiple of seq_len * world_size for clean batches
+            granularity = current_seq_len * world_size * grad_accum_steps
+            current_batch_tokens = max(granularity, int(raw) // granularity * granularity)
+        elif batch_ramp_end_step is not None and current_batch_tokens != args.train_batch_tokens:
+            current_batch_tokens = args.train_batch_tokens
+            log0(f"Batch ramp: full batch size {args.train_batch_tokens} at step {step}")
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
@@ -1878,7 +1898,7 @@ def main() -> None:
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-            x, y = train_loader.next_batch(args.train_batch_tokens, current_seq_len, grad_accum_steps)
+            x, y = train_loader.next_batch(current_batch_tokens, current_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
