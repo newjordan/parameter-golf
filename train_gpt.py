@@ -80,16 +80,6 @@ class Hyperparameters:
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
     ortho_init = bool(int(os.environ.get("ORTHO_INIT", "0")))
 
-    # Fractal mode: weight-shared layers with loops, gravity, and AttnRes.
-    fractal = bool(int(os.environ.get("FRACTAL", "0")))
-    num_unique_layers = int(os.environ.get("NUM_UNIQUE_LAYERS", 3))
-    num_loops = int(os.environ.get("NUM_LOOPS", 3))
-    use_gravity = bool(int(os.environ.get("USE_GRAVITY", "1")))
-    use_attnres = bool(int(os.environ.get("USE_ATTNRES", "1")))
-    breath_pattern = os.environ.get("BREATH_PATTERN", "full,cheap,full").split(",")
-    # Progressive loop unrolling: comma-separated step thresholds for adding loops
-    # e.g. "0,3000,5000" = 1 loop at start, 2 loops at step 3000, 3 at step 5000
-    loop_schedule = os.environ.get("LOOP_SCHEDULE", "")
 
     # Leaderboard techniques
     muon_wd = float(os.environ.get("MUON_WD", 0.0))  # Muon weight decay
@@ -1173,176 +1163,6 @@ class BigramHash(nn.Module):
 # From Moonshot: arxiv:2603.15031
 # -----------------------------
 
-class AttnResModule(nn.Module):
-    """Single learned query attending over previous loop outputs.
-    Always fires — even with one input, the query gets gradient."""
-    def __init__(self, dim: int):
-        super().__init__()
-        self.query = nn.Parameter(torch.randn(dim) * 0.01)
-        self.prior = nn.Parameter(torch.randn(dim) * 0.01)
-
-    def forward(self, loop_outputs: list[Tensor], x_current: Tensor) -> Tensor:
-        B, T, D = x_current.shape
-        prior_expanded = self.prior.view(1, 1, D).expand(B, T, D)
-        candidates = [prior_expanded] + loop_outputs + [x_current]
-        V = torch.stack(candidates, dim=0)  # [N+2, B, T, D]
-        K = F.rms_norm(V, (V.size(-1),))
-        logits = torch.einsum("d, n b t d -> n b t", self.query, K)
-        weights = logits.softmax(dim=0)
-        return torch.einsum("n b t, n b t d -> b t d", weights, V)
-
-
-# -----------------------------
-# FRACTAL GPT (weight-shared layers + gravity + AttnRes)
-# -----------------------------
-
-class FractalGPT(nn.Module):
-    def __init__(
-        self,
-        vocab_size: int,
-        num_unique_layers: int,
-        num_loops: int,
-        model_dim: int,
-        num_heads: int,
-        num_kv_heads: int,
-        mlp_mult: int,
-        tie_embeddings: bool,
-        tied_embed_init_std: float,
-        logit_softcap: float,
-        rope_base: float,
-        qk_gain_init: float,
-        mlp_hidden: int = 0,
-        use_gravity: bool = True,
-        use_attnres: bool = True,
-        breath_pattern: list[str] | None = None,
-        smear_gate: bool = False,
-        bigram_hash: bool = False,
-        bigram_buckets: int = 4096,
-        bigram_dim: int = 128,
-        ortho_init: bool = False,
-    ):
-        super().__init__()
-        if logit_softcap <= 0.0:
-            raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
-        self.num_unique_layers = num_unique_layers
-        self.num_loops = num_loops
-        self.active_loops = num_loops  # progressive unrolling: training loop can lower this
-        self.tie_embeddings = tie_embeddings
-        self.tied_embed_init_std = tied_embed_init_std
-        self.logit_softcap = logit_softcap
-        self.ortho_init = ortho_init
-        self.use_gravity = use_gravity
-        self.use_attnres = use_attnres
-        if breath_pattern is None:
-            breath_pattern = ["full"] * num_loops
-        self.breath_pattern = breath_pattern
-
-        self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.smear_gate_mod = SmearGate(model_dim) if smear_gate else None
-        self.bigram_hash_mod = BigramHash(bigram_buckets, bigram_dim, model_dim) if bigram_hash else None
-        self.blocks = nn.ModuleList([
-            Block(model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, mlp_hidden)
-            for _ in range(num_unique_layers)
-        ])
-        self.final_norm = RMSNorm()
-        self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
-        if self.lm_head is not None:
-            self.lm_head._zero_init = True
-
-        self.loop_pos = nn.Parameter(torch.randn(num_loops, model_dim) * 0.01)
-
-        if use_gravity:
-            init_vals = [-2.0] * (num_loops - 1) + [0.0]
-            self.gravity_logits = nn.Parameter(torch.tensor(init_vals, dtype=torch.float32))
-
-        if use_attnres:
-            total_effective = num_unique_layers * num_loops
-            self.attnres_modules = nn.ModuleList([AttnResModule(model_dim) for _ in range(total_effective)])
-
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        if self.tie_embeddings:
-            nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                if getattr(module, "_zero_init", False):
-                    nn.init.zeros_(module.weight)
-                elif self.ortho_init and module.weight.ndim == 2 and min(module.weight.shape) >= 64:
-                    nn.init.orthogonal_(module.weight, gain=1.0)
-
-    def _compute_logits(self, x: Tensor) -> Tensor:
-        x = self.final_norm(x).reshape(-1, x.size(-1))
-        if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
-        else:
-            logits_proj = self.lm_head(x)
-        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-
-    def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, reduction: str = "auto") -> Tensor:
-        x = self.tok_emb(input_ids)
-        if self.bigram_hash_mod is not None:
-            x = x + self.bigram_hash_mod(input_ids)
-        if self.smear_gate_mod is not None:
-            x = self.smear_gate_mod(x)
-        x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-
-        loop_outputs: list[Tensor] = [x]
-        gravity_losses: list[Tensor] = []
-        bsz, sl = target_ids.shape
-        targets = target_ids.reshape(-1)
-        flat_idx = 0
-
-        num_active = self.active_loops if self.training else self.num_loops
-        for loop in range(num_active):
-            x = x + self.loop_pos[loop].to(dtype=x.dtype)
-            is_cheap = self.breath_pattern[loop].strip() == "cheap" if loop < len(self.breath_pattern) else False
-
-            for layer_idx in range(self.num_unique_layers):
-                if self.use_attnres:
-                    x = self.attnres_modules[flat_idx](loop_outputs, x)
-                x = self.blocks[layer_idx](x, x0, skip_mlp=is_cheap)
-                flat_idx += 1
-
-            loop_outputs.append(x)
-
-            if self.use_gravity and loop < num_active - 1:
-                aux_logits = self._compute_logits(x)
-                aux_loss = F.cross_entropy(aux_logits.float(), targets, reduction="mean")
-                weight = F.softplus(self.gravity_logits[loop])
-                gravity_losses.append(weight * aux_loss)
-
-        # Final output
-        x = self.final_norm(x)
-        if self.tie_embeddings:
-            logits = F.linear(x, self.tok_emb.weight)
-        else:
-            logits = self.lm_head(x)
-        logits = logits + (lora.lm_head_lora(x) if lora else 0)
-        logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
-
-        V = logits.size(-1)
-        if reduction == "auto":
-            reduction = "none" if lora else "mean"
-        if reduction == "none":
-            per_token = F.cross_entropy(
-                logits.float().reshape(-1, V), targets, reduction="none").reshape(bsz, sl)
-            if self.use_gravity and gravity_losses:
-                final_weight = F.softplus(self.gravity_logits[-1])
-                total_weight = sum(F.softplus(self.gravity_logits[i]) for i in range(self.num_loops))
-                gravity_mean = sum(gravity_losses) / total_weight
-                per_token = per_token * (final_weight / total_weight) + gravity_mean / (bsz * sl)
-            return per_token
-
-        final_loss = F.cross_entropy(logits.float().reshape(-1, V), targets, reduction="mean")
-        if self.use_gravity and gravity_losses:
-            final_weight = F.softplus(self.gravity_logits[-1])
-            total_loss = sum(gravity_losses) + final_weight * final_loss
-            total_weight = sum(F.softplus(self.gravity_logits[i]) for i in range(self.num_loops))
-            return total_loss / total_weight
-        return final_loss
-
 
 class GPT(nn.Module):
     def __init__(
@@ -1804,35 +1624,7 @@ def main() -> None:
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
 
-    if args.fractal:
-        log0(f"fractal_mode:on unique_layers:{args.num_unique_layers} loops:{args.num_loops} "
-             f"gravity:{args.use_gravity} attnres:{args.use_attnres} "
-             f"breath:{','.join(args.breath_pattern)}")
-        base_model = FractalGPT(
-            vocab_size=args.vocab_size,
-            num_unique_layers=args.num_unique_layers,
-            num_loops=args.num_loops,
-            model_dim=args.model_dim,
-            num_heads=args.num_heads,
-            num_kv_heads=args.num_kv_heads,
-            mlp_mult=args.mlp_mult,
-            mlp_hidden=args.mlp_hidden,
-            tie_embeddings=args.tie_embeddings,
-            tied_embed_init_std=args.tied_embed_init_std,
-            logit_softcap=args.logit_softcap,
-            rope_base=args.rope_base,
-            qk_gain_init=args.qk_gain_init,
-            use_gravity=args.use_gravity,
-            use_attnres=args.use_attnres,
-            breath_pattern=args.breath_pattern,
-            smear_gate=args.smear_gate,
-            bigram_hash=args.bigram_hash,
-            bigram_buckets=args.bigram_buckets,
-            bigram_dim=args.bigram_dim,
-            ortho_init=args.ortho_init,
-        ).to(device).bfloat16()
-    else:
-        base_model = GPT(
+    base_model = GPT(
             vocab_size=args.vocab_size,
             num_layers=args.num_layers,
             model_dim=args.model_dim,
@@ -1858,7 +1650,7 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    use_fullgraph = not args.fractal and args.seq_ramp_start == 0  # dynamic shapes break fullgraph
+    use_fullgraph = args.seq_ramp_start == 0  # dynamic shapes break fullgraph
     use_dynamic = args.seq_ramp_start > 0  # enable dynamic shapes for seq ramp
     compiled_model = torch.compile(base_model, dynamic=use_dynamic, fullgraph=use_fullgraph)
     if distributed:
@@ -1891,15 +1683,6 @@ def main() -> None:
         scalar_params.append(base_model.smear_gate.gate)
     if hasattr(base_model, 'smear_gate_mod') and base_model.smear_gate_mod is not None:
         scalar_params.append(base_model.smear_gate_mod.gate)
-    # Fractal-specific scalar params
-    if hasattr(base_model, 'loop_pos'):
-        scalar_params.append(base_model.loop_pos)
-    if hasattr(base_model, 'gravity_logits'):
-        scalar_params.append(base_model.gravity_logits)
-    if hasattr(base_model, 'attnres_modules'):
-        for arm in base_model.attnres_modules:
-            scalar_params.append(arm.query)
-            scalar_params.append(arm.prior)
     # BigramHash: table embedding goes to Adam (like tok_emb), proj is 2D matrix for Muon
     bigram_mod = getattr(base_model, 'bigram_hash_mod', None)
     if bigram_mod is not None:
@@ -1955,7 +1738,7 @@ def main() -> None:
     log0(f"seed:{args.seed}")
     log0(f"qat_start_frac:{args.qat_start_frac} quant_bits:{args.quant_bits} eval_stride:{args.eval_stride} "
          f"muon_wd:{args.muon_wd} fp16_embed:{args.fp16_embed} smear_gate:{args.smear_gate} "
-         f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} fractal:{args.fractal} "
+         f"bigram_hash:{args.bigram_hash} ortho_init:{args.ortho_init} "
          f"int5_mlp:{args.int5_mlp} use_zstd:{args.use_zstd} prune_pct:{args.prune_pct} "
          f"seq_ramp_start:{args.seq_ramp_start} xsa_last_n:{args.xsa_last_n}")
 
@@ -2036,12 +1819,6 @@ def main() -> None:
         seq_ramp_step = int(args.iterations * args.seq_ramp_frac)
         log0(f"Seq ramp: start={args.seq_ramp_start}, ramp to {args.train_seq_len} at step {seq_ramp_step}")
 
-    # Progressive loop unrolling schedule
-    loop_thresholds: list[int] = []
-    if args.loop_schedule and args.fractal and hasattr(base_model, 'active_loops'):
-        loop_thresholds = [int(x) for x in args.loop_schedule.split(",")]
-        base_model.active_loops = 1  # start with 1 loop
-        log0(f"Progressive loop unrolling: schedule={loop_thresholds} (starting with 1 loop)")
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -2093,13 +1870,6 @@ def main() -> None:
             torch._dynamo.reset()  # clear compiled graphs for new seq length
             log0(f"Seq ramp: switching to full seq_len={args.train_seq_len} at step {step}")
 
-        # Progressive loop unrolling for fractal
-        if loop_thresholds and hasattr(base_model, 'active_loops'):
-            target_loops = sum(1 for t in loop_thresholds if step >= t)
-            target_loops = max(1, min(target_loops, base_model.num_loops))
-            if target_loops != base_model.active_loops:
-                base_model.active_loops = target_loops
-                log0(f"Fractal loops: {target_loops}/{base_model.num_loops} at step {step}")
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
