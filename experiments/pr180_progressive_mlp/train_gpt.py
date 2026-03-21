@@ -68,6 +68,9 @@ class Hyperparameters:
     # Progressive MLP: comma-separated per-layer multipliers, must match num_layers.
     # If empty, uses uniform mlp_mult. Example: "2.0,2.22,2.44,2.67,2.89,3.11,3.33,3.56,3.78,4.0"
     mlp_schedule_str = os.environ.get("MLP_SCHEDULE", "")
+    # Progressive attention gain: comma-separated per-layer qk_gain_init values.
+    # Low = soft/broad attention, high = sharp/focused. Example: "0.5,0.72,0.94,1.17,1.39,1.61,1.83,2.06,2.28,2.5"
+    qk_gain_schedule_str = os.environ.get("QK_GAIN_SCHEDULE", "")
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
@@ -650,12 +653,15 @@ class GPT(nn.Module):
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
         mlp_schedule: list[float] | None = None,
+        qk_gain_schedule: list[float] | None = None,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         if mlp_schedule is not None and len(mlp_schedule) != num_layers:
             raise ValueError(f"mlp_schedule length {len(mlp_schedule)} != num_layers {num_layers}")
+        if qk_gain_schedule is not None and len(qk_gain_schedule) != num_layers:
+            raise ValueError(f"qk_gain_schedule length {len(qk_gain_schedule)} != num_layers {num_layers}")
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
@@ -667,9 +673,10 @@ class GPT(nn.Module):
         self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
         self.smear = SmearGate(model_dim)
         per_layer_mult = mlp_schedule if mlp_schedule is not None else [mlp_mult] * num_layers
+        per_layer_gain = qk_gain_schedule if qk_gain_schedule is not None else [qk_gain_init] * num_layers
         self.blocks = nn.ModuleList(
             [
-                Block(model_dim, num_heads, num_kv_heads, per_layer_mult[i], rope_base, qk_gain_init)
+                Block(model_dim, num_heads, num_kv_heads, per_layer_mult[i], rope_base, per_layer_gain[i])
                 for i in range(num_layers)
             ]
         )
@@ -915,6 +922,12 @@ def main() -> None:
             raise ValueError(f"MLP_SCHEDULE has {len(mlp_schedule)} entries but NUM_LAYERS={args.num_layers}")
         log0(f"progressive_mlp: {[f'{m:.2f}' for m in mlp_schedule]}")
         log0(f"progressive_mlp_hidden: {[int(m * args.model_dim) for m in mlp_schedule]}")
+    qk_gain_schedule: list[float] | None = None
+    if args.qk_gain_schedule_str:
+        qk_gain_schedule = [float(x.strip()) for x in args.qk_gain_schedule_str.split(",")]
+        if len(qk_gain_schedule) != args.num_layers:
+            raise ValueError(f"QK_GAIN_SCHEDULE has {len(qk_gain_schedule)} entries but NUM_LAYERS={args.num_layers}")
+        log0(f"progressive_qk_gain: {[f'{g:.2f}' for g in qk_gain_schedule]}")
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -930,6 +943,7 @@ def main() -> None:
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
         mlp_schedule=mlp_schedule,
+        qk_gain_schedule=qk_gain_schedule,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):

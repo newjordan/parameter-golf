@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# A/B/C TEST: Uniform vs Progressive MLP vs Progressive MLP + Fat BigramHash
+# A/B/C/D TEST: Progressive architecture experiments
 #
 # All runs use identical #180 config except:
 #   A: Uniform MLP 3.0× (control — exact #180)
 #   B: Progressive MLP 1.5×→4.5× (same total params)
 #   C: Progressive MLP 1.5×→4.5× + BigramHash 16384 buckets, dim 192
 #      (compensate thin early layers with richer bigram input)
+#   D: Progressive MLP + fat BigramHash + progressive attention gain
+#      (soft/broad early, sharp/focused late)
 #
-# 1xGPU, comparing BPB delta only. ~30 min total.
+# 1xGPU, comparing BPB delta only. ~40 min total.
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
@@ -52,10 +54,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROGRESSIVE="1.5,1.83,2.17,2.5,2.83,3.17,3.5,3.83,4.17,4.5"
 
 echo "============================================"
-echo "  A/B/C Test: MLP Distribution + BigramHash"
+echo "  A/B/C/D Test: Progressive Architecture"
 echo "  1xGPU — comparing delta only"
 echo "  Logs: $LOGDIR"
 echo "============================================"
+
+# Attention gain ramp: soft early (0.5) → sharp late (2.5)
+# Average = 1.5 (same as uniform default)
+QK_GAIN_SCHEDULE="0.5,0.72,0.94,1.17,1.39,1.61,1.83,2.06,2.28,2.5"
 
 # --- RUN A: Uniform 3.0× (control) ---
 echo ""
@@ -78,12 +84,19 @@ env $COMMON BIGRAM_VOCAB_SIZE=16384 BIGRAM_DIM=192 MLP_SCHEDULE="$PROGRESSIVE" R
     python "$SCRIPT_DIR/train_gpt.py" \
     2>&1 | tee "$LOGDIR/C_prog_fatbigram.log"
 
+# --- RUN D: Progressive MLP + Fat BigramHash + Progressive Attention ---
+echo ""
+echo "=== [D] PROGRESSIVE MLP + BigramHash 16384/192 + PROGRESSIVE ATTN GAIN ==="
+env $COMMON BIGRAM_VOCAB_SIZE=16384 BIGRAM_DIM=192 MLP_SCHEDULE="$PROGRESSIVE" QK_GAIN_SCHEDULE="$QK_GAIN_SCHEDULE" RUN_ID="abcd_D_full_progressive" \
+    python "$SCRIPT_DIR/train_gpt.py" \
+    2>&1 | tee "$LOGDIR/D_full_progressive.log"
+
 # --- RESULTS ---
 echo ""
 echo "============================================"
-echo "  A/B/C RESULTS"
+echo "  A/B/C/D RESULTS"
 echo "============================================"
-for label in A_uniform B_progressive C_prog_fatbigram; do
+for label in A_uniform B_progressive C_prog_fatbigram D_full_progressive; do
     f="$LOGDIR/${label}.log"
     bpb=$(grep -oP "final_int8_zlib_roundtrip val_loss:\S+ val_bpb:\K\S+" "$f" 2>/dev/null | tail -1)
     raw_bpb=$(grep -oP "^step:\d+/\d+ val_loss:\S+ val_bpb:\K\S+" "$f" 2>/dev/null | tail -1)
@@ -97,4 +110,6 @@ echo "  A = control (exact #180)"
 echo "  B < A → progressive MLP helps"
 echo "  C < B → fat BigramHash compensates thin early layers"
 echo "  C < A but B > A → need both together"
+echo "  D < C → progressive attention gain adds value"
+echo "  D is the full thesis: fuzzy-early, sharp-late everything"
 echo "============================================"
