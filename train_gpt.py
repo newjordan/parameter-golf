@@ -1652,14 +1652,15 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    use_fullgraph = args.seq_ramp_start == 0  # dynamic shapes break fullgraph
-    use_dynamic = args.seq_ramp_start > 0  # enable dynamic shapes for seq ramp
-    compiled_model = torch.compile(base_model, dynamic=use_dynamic, fullgraph=use_fullgraph)
+    # Seq ramp changes tensor shapes mid-training — torch.compile can't handle this reliably.
+    # Skip compilation entirely when seq ramp is active. ~5-10% slower per step but stable.
+    if args.seq_ramp_start > 0:
+        compiled_model = base_model  # no torch.compile
+        log0("torch.compile DISABLED (seq ramp active — dynamic shapes)")
+    else:
+        compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     if distributed:
-        ddp_kwargs: dict = dict(device_ids=[local_rank], broadcast_buffers=False)
-        if args.seq_ramp_start > 0:
-            ddp_kwargs["find_unused_parameters"] = True
-        model: nn.Module = DDP(compiled_model, **ddp_kwargs)
+        model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
     else:
         model = compiled_model
 

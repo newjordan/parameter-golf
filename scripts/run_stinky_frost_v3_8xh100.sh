@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# STINKY FROST V3 — V2 + batch ramp + less frequent val
+# STINKY FROST V3 — V2 + seq ramp + batch ramp + less frequent val
 #
 # V2 base (11L + Int6 + zstd + XSA + SWA + WD0.04 + TTT SGD 3ep)
-# + Batch size warmup: 262144 → 524288 over first 25% of steps
-#   More gradient updates when gradients are most informative.
-#   AI2 OLMo: 43% fewer steps needed with batch warmup.
+# + Seq ramp: 256→1024 at 20% (O(n²) savings, ~4x faster attention early)
+#   torch.compile disabled for stability with dynamic shapes
+# + Batch size warmup: 262144→524288 over first 25%
+#   More gradient updates when gradients are most informative
 # + VAL_LOSS_EVERY=1000 (save ~10s eval time)
 #
-# Target: beat V2 score by getting more effective gradient updates early
+# Two novel untried techniques. Target: more gradient updates = better BPB
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024/}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
@@ -26,8 +27,8 @@ LOGDIR="logs/stinky_frost_v3_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 
 echo "============================================"
-echo "  STINKY FROST V3 — BATCH RAMP"
-echo "  V2 + batch warmup 262K→524K"
+echo "  STINKY FROST V3 — SEQ RAMP + BATCH RAMP"
+echo "  V2 + seq256→1024 + batch 262K→524K"
 echo "  Logs: $LOGDIR"
 echo "============================================"
 
@@ -43,6 +44,7 @@ MUON_WD=0.04 \
 SWA_EVERY=50 SWA_START_FRAC=0.4 \
 USE_ZSTD=1 ZSTD_LEVEL=22 PRUNE_PCT=0.03 \
 XSA_LAST_N=3 \
+SEQ_RAMP_START=256 SEQ_RAMP_FRAC=0.2 \
 BATCH_RAMP_START=262144 BATCH_RAMP_FRAC=0.25 \
 TTT_OPTIMIZER=sgd TTT_LORA_LR=0.002 TTT_EPOCHS=3 TTT_MOMENTUM=0.9 TTT_FREEZE_FIRST_N=2 \
 NCCL_IB_DISABLE=1 RUN_ID=stinky_frost_v3 \
