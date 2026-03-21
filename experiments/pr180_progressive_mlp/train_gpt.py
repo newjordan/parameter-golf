@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from flash_attn_interface import flash_attn_func as flash_attn_3_func
+from flash_attn import flash_attn_func as flash_attn_3_func
 
 # -----------------------------
 # HYPERPARAMETERS
