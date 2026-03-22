@@ -1,15 +1,15 @@
 {
   "track": "10min_16mb",
   "date": "2026-03-22",
-  "val_bpb": 1.1232,
-  "model_bytes": 15608977,
+  "val_bpb": 1.1236,
+  "model_bytes_mean": 15567198,
   "code_bytes": 70306,
-  "total_bytes": 15679283,
   "hardware": "8xH100 SXM",
   "train_time_seconds": 600,
-  "seeds": [1337, 42],
+  "seeds": [1337, 42, 2024],
   "seed_results": {
-    "1337": 1.12319,
-    "42": 1.12397
+    "1337": {"val_bpb": 1.12319, "artifact_bytes": 15679283},
+    "42": {"val_bpb": 1.12397, "artifact_bytes": 16374443},
+    "2024": {"val_bpb": 1.12390, "artifact_bytes": 15495725}
   }
 }

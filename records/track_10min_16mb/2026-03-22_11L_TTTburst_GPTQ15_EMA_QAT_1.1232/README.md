@@ -1,6 +1,6 @@
-## Record: 11L TTT Burst + EMA + GPTQ-lite (val_bpb=1.1232)
+## Record: 11L TTT Burst + EMA + GPTQ-lite + warmdown3500 + QAT@0.15
 
-**val_bpb: 1.1232** (sliding window stride=64, seed 1337) | **15.68 MB** | 8xH100 SXM, 600s
+**val_bpb: 1.1236** (sliding window stride=64, 2-seed mean) | **15.59 MB** (mean) | 8xH100 SXM, 600s
 
 ### Key Innovation Over PR #414
 
@@ -14,14 +14,17 @@ Everything else inherited from PR #414: EMA(0.997), GPTQ-lite(5 percentiles), wa
 
 After the main training loop and before EMA application, we replay the last 100 training batches for 2 epochs at 10% of base LR. EMA is updated during the burst so it absorbs the sharpened signal. This gives the model a final sharpening pass on recent data before weight averaging and quantization.
 
-### Results (8xH100 SXM)
+### Results (3 seeds, 8xH100 SXM)
 
 | Seed | Steps | val_loss | Sliding BPB (s64) | Artifact |
 |------|-------|----------|-------------------|----------|
 | **1337** | 6991 | 1.9246 | **1.1232** | 15.68 MB |
 | 42 | 6994 | 1.9262 | 1.1240 | 16.37 MB* |
+| **2024** | 6987 | 1.9255 | **1.1239** | 15.50 MB |
 
-*Seed 42 artifact over size limit due to compression variance; BPB still validates the approach.
+**Mean (1337+2024): 1.1236 | Std: 0.0004**
+
+*Seed 42 artifact over size limit due to compression variance; BPB validates the approach.
 
 ### Architecture
 
@@ -35,9 +38,9 @@ SEED=1337 torchrun --nproc_per_node=8 train_gpt.py
 
 ### Test plan
 
-- [x] Seed 1337 under 16MB (15.68 MB)
-- [x] Seed 1337 trains in 600s on 8xH100
-- [x] Post-quant roundtrip verified
-- [x] Sliding window eval (stride=64) consistent across seeds
-- [x] train_gpt.py under 1500 lines
+- [x] All seeds train in 600s on 8xH100
+- [x] Seeds 1337, 2024 under 16MB (15.68 MB, 15.50 MB)
+- [x] Post-quant int6 roundtrip verified
+- [x] Sliding window eval (stride=64) consistent across seeds (std=0.0004)
+- [x] train_gpt.py under 1500 lines (1443)
 - [x] No TTT on validation data
