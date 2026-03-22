@@ -1,0 +1,14 @@
+{
+  "track": "10min_16mb",
+  "date": "2026-03-22",
+  "val_bpb": 1.1232,
+  "model_bytes": 15608977,
+  "code_bytes": 70306,
+  "total_bytes": 15679283,
+  "hardware": "8xH100 SXM",
+  "train_time_seconds": 600,
+  "seeds": [1337, 42, 2024],
+  "seed_results": {
+    "1337": 1.1232
+  }
+}
