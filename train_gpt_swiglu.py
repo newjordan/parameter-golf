@@ -47,10 +47,10 @@ class Hyperparameters:
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
     iterations = int(os.environ.get("ITERATIONS", 20000))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", "6000"))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", "3500"))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
-    train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
-    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
+    train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 786_432))
+    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
@@ -94,11 +94,11 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
-    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
 
     # EMA: exponential moving average, updates every step (priority over SWA)
     ema_enabled = bool(int(os.environ.get("EMA_ENABLED", "1")))
-    ema_decay = float(os.environ.get("EMA_DECAY", "0.9985"))
+    ema_decay = float(os.environ.get("EMA_DECAY", "0.997"))
 
     # SWA config (fallback when EMA disabled)
     swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))
@@ -108,8 +108,26 @@ class Hyperparameters:
     late_qat = bool(int(os.environ.get("LATE_QAT", "1")))
     qat_threshold = float(os.environ.get("QAT_THRESHOLD", "0.5"))  # earlier QAT: 3x more steps
 
-    # TTT REMOVED — illegal per issue #402 (trains on all val data before scoring)
-    ttt_enabled = False
+    # Legal score-first TTT eval (PR #461 recipe) — score chunk, THEN train on it
+    ttt_eval_enabled = bool(int(os.environ.get("TTT_EVAL_ENABLED", "0")))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adamw")
+    ttt_lr = float(os.environ.get("TTT_LR", 0.0005))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 10))
+    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32768))
+    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 0))
+    ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
+    ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
+    ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_max_train_chunks = int(os.environ.get("TTT_MAX_TRAIN_CHUNKS", 200))
+    ttt_ema_decay = float(os.environ.get("TTT_EMA_DECAY", 0.995))
+    ttt_freeze_embed = bool(int(os.environ.get("TTT_FREEZE_EMBED", "1")))
+
+    # Selective int8: keep sensitive layers at int8 instead of int6
+    int8_sensitive = os.environ.get("INT8_SENSITIVE", "attn.proj")
+
+    # VRL: Value Residual Learning — mix first-block output into deeper block attention
+    vrl_enabled = bool(int(os.environ.get("VRL_ENABLED", "1")))
+
     xsa_layers = int(os.environ.get("XSA_LAYERS", "4"))
 
 
@@ -551,7 +569,8 @@ def quantize_float_tensor_int6(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), INT6_MIN, INT6_MAX).to(torch.int8).contiguous()
     return q, scale
 
-def quantize_state_dict_int6(state_dict: dict[str, Tensor], gptq_hessians: dict[str, Tensor] | None = None):
+def quantize_state_dict_int6(state_dict: dict[str, Tensor], gptq_hessians: dict[str, Tensor] | None = None,
+                              int8_sensitive_patterns: tuple[str, ...] = ()):
     quantized: dict[str, Tensor] = {}
     scales: dict[str, Tensor] = {}
     dtypes: dict[str, str] = {}
@@ -595,8 +614,10 @@ def quantize_state_dict_int6(state_dict: dict[str, Tensor], gptq_hessians: dict[
         module_name = name.rsplit(".weight", 1)[0] if name.endswith(".weight") else name
         H = gptq_hessians.get(module_name) if gptq_hessians and t_q.ndim == 2 else None
         skip_gptq = gptq_skip_mlp and is_mlp
+        use_int8 = any(p in name for p in int8_sensitive_patterns) if int8_sensitive_patterns else False
+        clip = 127 if use_int8 else 31
         if H is not None and H.shape[0] == t_q.shape[1] and not skip_gptq:
-            q, s = gptq_quantize_weight(t_q, H.cpu())
+            q, s = gptq_quantize_weight(t_q, H.cpu(), clip_range=clip)
             gptq_count += 1
         else:
             q, s = quantize_float_tensor_int6(t_q)
@@ -865,7 +886,7 @@ class MLP(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         x_up = self.up_proj(x)
-        activated = F.relu(x_up).pow(2)
+        activated = F.leaky_relu(x_up, 0.5).pow(2)
         activated = activated * self.scale.to(dtype=activated.dtype) + self.bias.to(dtype=activated.dtype)
         return self.down_proj(activated)
 
@@ -892,14 +913,19 @@ class Block(nn.Module):
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
+        self.vrl_lambda = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
         # LN Scale: dampen norm inputs by 1/sqrt(layer_idx+1) for deeper layers
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+    def forward(self, x: Tensor, x0: Tensor, v_first: Tensor | None = None) -> Tensor:
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        attn_input = x
+        if v_first is not None:
+            lam = torch.sigmoid(self.vrl_lambda)
+            attn_input = lam * x + (1 - lam) * v_first
         s = self.ln_scale_factor
-        attn_out = self.attn(self.attn_norm(x) * s)
+        attn_out = self.attn(self.attn_norm(attn_input) * s)
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
         x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x) * s)
         return x
@@ -968,6 +994,7 @@ class GPT(nn.Module):
         rope_dims: int = 0,
         ln_scale: bool = False,
         xsa_last_n: int = 0,
+        vrl_enabled: bool = True,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -975,6 +1002,7 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.vrl_enabled = vrl_enabled
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram_emb = BigramHashEmbedding(bigram_buckets, bigram_embed_dim, model_dim)
         self.smear_gate = SmearGate(model_dim)
@@ -1012,10 +1040,13 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear_gate(x)
         x0 = x
+        v_first: Tensor | None = None
         skips: list[Tensor] = []
 
         for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
+            x = self.blocks[i](x, x0, v_first if self.vrl_enabled else None)
+            if i == 0:
+                v_first = x.detach()
             skips.append(x)
         for i in range(self.num_decoder_layers):
             if skips:
@@ -1023,7 +1054,7 @@ class GPT(nn.Module):
                 gate = torch.sigmoid(self.skip_gates[i].to(dtype=x.dtype))
                 scaled_skip = self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skip
                 x = gate[None, None, :] * x + (1.0 - gate[None, None, :]) * scaled_skip
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            x = self.blocks[self.num_encoder_layers + i](x, x0, v_first if self.vrl_enabled else None)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -1043,9 +1074,12 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear_gate(x)
         x0 = x
+        v_first: Tensor | None = None
         skips: list[Tensor] = []
         for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
+            x = self.blocks[i](x, x0, v_first if self.vrl_enabled else None)
+            if i == 0:
+                v_first = x.detach()
             skips.append(x)
         for i in range(self.num_decoder_layers):
             if skips:
@@ -1053,7 +1087,7 @@ class GPT(nn.Module):
                 gate = torch.sigmoid(self.skip_gates[i].to(dtype=x.dtype))
                 scaled_skip = self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skip
                 x = gate[None, None, :] * x + (1.0 - gate[None, None, :]) * scaled_skip
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            x = self.blocks[self.num_encoder_layers + i](x, x0, v_first if self.vrl_enabled else None)
         x = self.final_norm(x)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
@@ -1062,10 +1096,156 @@ class GPT(nn.Module):
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
 
 
-# TTT REMOVED — illegal per issue #402
-# The old ttt_adapt() trained on ALL val data for N epochs BEFORE scoring.
-# This violates the score-first requirement. See eval_val_sliding_ttt in
-# train_gpt_v7.py for the legal score-first sliding window alternative.
+# -----------------------------
+# LEGAL SCORE-FIRST TTT (PR #461 recipe)
+# Score each chunk FIRST, then train on it. Legal per issue #402.
+# -----------------------------
+
+def eval_val_sliding_ttt(
+    args: Hyperparameters, base_model: nn.Module, rank: int, world_size: int,
+    device: torch.device, val_tokens: Tensor, base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor, is_boundary_token_lut: Tensor,
+    stride: int, batch_seqs: int = 32,
+) -> tuple[float, float]:
+    seq_len, total_tokens, ttt_chunk = args.train_seq_len, val_tokens.numel() - 1, args.ttt_chunk_tokens
+    master = (rank == 0)
+    log0 = (lambda msg: print(msg, flush=True)) if master else (lambda msg: None)
+    window_starts = [ws for ws in range(0, total_tokens, stride) if min(ws + seq_len, total_tokens) - ws >= stride or ws == 0]
+    num_chunks = (total_tokens + ttt_chunk - 1) // ttt_chunk
+    chunk_windows: list[list[int]] = [[] for _ in range(num_chunks)]
+    for ws in window_starts:
+        end = min(ws + seq_len, total_tokens)
+        wlen = end - ws
+        s = 0 if ws == 0 else max(wlen - stride, 0)
+        chunk_windows[min((ws + s) // ttt_chunk, num_chunks - 1)].append(ws)
+    log0(f"ttt_sliding:start chunks={num_chunks} windows={len(window_starts)} lr={args.ttt_lr} epochs={args.ttt_epochs} freeze={args.ttt_freeze_blocks}")
+    loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    token_count = torch.zeros((), device=device, dtype=torch.float64)
+    byte_count = torch.zeros((), device=device, dtype=torch.float64)
+    frozen_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    embed_names = {"tok_emb", "bigram", "ve_shared"} if args.ttt_freeze_embed else set()
+    ttt_params = []
+    for name, p in base_model.named_parameters():
+        if any(f"blocks.{bi}." in name for bi in frozen_ids):
+            p.requires_grad_(False)
+        elif any(en in name for en in embed_names):
+            p.requires_grad_(False)
+        else:
+            p.requires_grad_(True); ttt_params.append(p)
+    log0(f"ttt_sliding:unfrozen={sum(p.numel() for p in ttt_params)} freeze_embed={args.ttt_freeze_embed}")
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+        log0(f"ttt_sliding:optimizer=AdamW lr={args.ttt_lr}")
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        log0(f"ttt_sliding:optimizer=SGD lr={args.ttt_lr} momentum={args.ttt_momentum}")
+    ema_decay = args.ttt_ema_decay
+    ema_state = None
+    raw_state = None
+    if ema_decay > 0:
+        ema_state = {n: p.data.clone() for n, p in base_model.named_parameters() if p.requires_grad}
+        raw_state = {n: torch.empty_like(p.data) for n, p in base_model.named_parameters() if n in ema_state}
+        log0(f"ttt_sliding:ema_decay={ema_decay} ema_params={len(ema_state)}")
+    t0 = time.perf_counter()
+    cur_lr = args.ttt_lr
+    for ci in range(num_chunks):
+        windows = chunk_windows[ci]
+        if not windows:
+            continue
+        chunk_start, chunk_end = ci * ttt_chunk, min((ci + 1) * ttt_chunk, total_tokens)
+        my_windows = windows[(len(windows) * rank) // world_size:(len(windows) * (rank + 1)) // world_size]
+        # Phase 1: SCORE this chunk (swap to EMA weights if available)
+        if ema_state is not None and ci > 0:
+            for n, p in base_model.named_parameters():
+                if n in ema_state:
+                    raw_state[n].copy_(p.data)
+                    p.data.copy_(ema_state[n])
+        base_model.eval()
+        with torch.inference_mode():
+            for bi in range(0, len(my_windows), batch_seqs):
+                batch_ws = my_windows[bi:bi + batch_seqs]
+                bsz = len(batch_ws)
+                x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                y_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                wlens = []
+                for i, ws in enumerate(batch_ws):
+                    wlen = min(ws + seq_len, total_tokens) - ws; wlens.append(wlen)
+                    ct = val_tokens[ws:ws + wlen + 1].to(dtype=torch.int64, device=device)
+                    x_batch[i, :wlen] = ct[:-1]; y_batch[i, :wlen] = ct[1:]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = base_model.forward_logits(x_batch)
+                nll = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y_batch.reshape(-1), reduction="none",
+                ).reshape(bsz, seq_len)
+                for i, ws in enumerate(batch_ws):
+                    wlen, s = wlens[i], 0 if ws == 0 else max(wlens[i] - stride, 0)
+                    loss_sum += nll[i, s:wlen].to(torch.float64).sum(); token_count += float(wlen - s)
+                    tgt, prev = y_batch[i, s:wlen], x_batch[i, s:wlen]
+                    tb = base_bytes_lut[tgt].to(torch.float64) + (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
+                    byte_count += tb.sum()
+        # Restore raw weights after scoring
+        if ema_state is not None and ci > 0:
+            for n, p in base_model.named_parameters():
+                if n in raw_state:
+                    p.data.copy_(raw_state[n])
+        # Phase 2: TRAIN on this chunk (already scored = legal)
+        if ci < num_chunks - 1 and ci < args.ttt_max_train_chunks and args.ttt_epochs > 0:
+            base_model.train()
+            chunk_seqs = (chunk_end - chunk_start) // seq_len
+            if chunk_seqs > 0:
+                cosine_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(args.ttt_max_train_chunks - 1, 1)))
+                cur_lr = cosine_lr
+                for pg in optimizer.param_groups:
+                    pg['lr'] = cur_lr
+                ms, me = (chunk_seqs * rank) // world_size, (chunk_seqs * (rank + 1)) // world_size
+                for _ep in range(args.ttt_epochs):
+                    for bs in range(0, me - ms, args.ttt_batch_seqs):
+                        be = min(bs + args.ttt_batch_seqs, me - ms)
+                        start_tok = chunk_start + (ms + bs) * seq_len
+                        end_tok = chunk_start + (ms + be) * seq_len + 1
+                        if end_tok > val_tokens.numel():
+                            continue
+                        local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
+                        x = local[:-1].reshape(-1, seq_len)
+                        y = local[1:].reshape(-1, seq_len)
+                        optimizer.zero_grad(set_to_none=True)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            loss = base_model(x, y)
+                        loss.backward()
+                        if world_size > 1:
+                            for p in ttt_params:
+                                if p.grad is not None:
+                                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                        optimizer.step()
+                if ema_state is not None:
+                    with torch.no_grad():
+                        for n, p in base_model.named_parameters():
+                            if n in ema_state:
+                                ema_state[n].mul_(ema_decay).add_(p.data, alpha=1.0 - ema_decay)
+        if ema_state is not None and ci == args.ttt_max_train_chunks:
+            log0(f"  ttt:loading EMA weights permanently at chunk {ci}")
+            for n, p in base_model.named_parameters():
+                if n in ema_state:
+                    p.data.copy_(ema_state[n])
+            ema_state = None
+            raw_state = None
+        if master and (ci % 5 == 0 or ci == num_chunks - 1):
+            rl = loss_sum.item() / max(token_count.item(), 1)
+            cur_bpb = rl / math.log(2) * (token_count.item() / max(byte_count.item(), 1)) if token_count.item() > 0 else 0
+            lr_str = f" lr={cur_lr:.6f}" if ci < args.ttt_max_train_chunks else " lr=done"
+            log0(f"  ttt[{ci+1}/{num_chunks}] bpb={cur_bpb:.6f}{lr_str} t={time.perf_counter()-t0:.0f}s")
+    if dist.is_available() and dist.is_initialized():
+        for t in [loss_sum, token_count, byte_count]:
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    val_loss = (loss_sum / token_count).item()
+    val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
+    for p in base_model.parameters():
+        p.requires_grad_(True)
+    base_model.eval()
+    log0(f"ttt_sliding:done loss={val_loss:.6f} bpb={val_bpb:.6f} time={time.perf_counter()-t0:.0f}s")
+    return val_loss, val_bpb
 
 
 # -----------------------------
@@ -1178,6 +1358,7 @@ def main() -> None:
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
         xsa_last_n=args.xsa_layers,
+        vrl_enabled=args.vrl_enabled,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1268,8 +1449,8 @@ def main() -> None:
     log0(f"tie_embeddings:{args.tie_embeddings} embed_lr:{token_lr} head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr} decoder_lr_mult:{args.decoder_lr_mult}")
     log0(f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} iterations:{args.iterations} warmup_steps:{args.warmup_steps} max_wallclock_seconds:{args.max_wallclock_seconds:.3f}")
     log0(f"rope_dims:{args.rope_dims} ln_scale:{args.ln_scale}")
-    log0(f"muon_wd:{args.muon_wd} adam_wd:{args.adam_wd} ema_enabled:{args.ema_enabled} late_qat:{args.late_qat}")
-    log0(f"bigram_buckets:{args.bigram_buckets} bigram_embed_dim:{args.bigram_embed_dim} seed:{args.seed}")
+    log0(f"muon_wd:{args.muon_wd} adam_wd:{args.adam_wd} ema_enabled:{args.ema_enabled} late_qat:{args.late_qat} ttt_eval:{args.ttt_eval_enabled}")
+    log0(f"bigram_buckets:{args.bigram_buckets} bigram_embed_dim:{args.bigram_embed_dim} seed:{args.seed} vrl:{args.vrl_enabled}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1464,8 +1645,6 @@ def main() -> None:
     else:
         log0("weight_avg:skipped (no EMA or SWA state)")
 
-    # TTT REMOVED — illegal per issue #402 (trains on all val data before scoring)
-
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
     # -----------------------------
@@ -1483,7 +1662,10 @@ def main() -> None:
     t_gptq = time.perf_counter()
     gptq_hessians = gptq_calibrate(base_model, args.train_files, device, n_samples=256, seq_len=args.train_seq_len)
     log0(f"gptq:calibrated {len(gptq_hessians)} layers in {time.perf_counter()-t_gptq:.1f}s")
-    quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict(), gptq_hessians=gptq_hessians)
+    int8_pats = tuple(p.strip() for p in args.int8_sensitive.split(",") if p.strip())
+    if int8_pats:
+        log0(f"gptq:int8_sensitive patterns: {int8_pats}")
+    quant_obj, quant_stats = quantize_state_dict_int6(base_model.state_dict(), gptq_hessians=gptq_hessians, int8_sensitive_patterns=int8_pats)
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
@@ -1533,6 +1715,18 @@ def main() -> None:
     torch.cuda.synchronize()
     log0(f"final_int6_{compression_method}_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval:{1000.0*(time.perf_counter()-t_qeval):.0f}ms")
     log0(f"final_int6_{compression_method}_roundtrip_exact val_bpb:{q_val_bpb:.8f}")
+
+    # Legal score-first TTT on quantized model
+    if args.ttt_eval_enabled:
+        log0(f"ttt:start legal score-first TTT (lr={args.ttt_lr} epochs={args.ttt_epochs} optimizer={args.ttt_optimizer})")
+        t_ttt = time.perf_counter()
+        ttt_loss, ttt_bpb = eval_val_sliding_ttt(
+            args, base_model, rank, world_size, device, val_tokens,
+            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            stride=args.eval_stride, batch_seqs=args.eval_batch_seqs,
+        )
+        log0(f"final_int6_ttt val_loss:{ttt_loss:.4f} val_bpb:{ttt_bpb:.4f} eval:{1000.0*(time.perf_counter()-t_ttt):.0f}ms")
+        log0(f"final_int6_ttt_exact val_bpb:{ttt_bpb:.8f}")
 
     if distributed:
         dist.destroy_process_group()
