@@ -1,4 +1,4 @@
-"""train_gpt.py — SwiGLU + U-Net + BigramHash + EMA + TTT + XSA4 + GPTQ-lite. Max 1500 lines."""
+"""train_gpt.py — SwiGLU + U-Net + BigramHash + EMA + XSA4 + GPTQ + Frugendorff. No TTT."""
 
 from __future__ import annotations
 
@@ -113,15 +113,6 @@ class Hyperparameters:
     late_qat = bool(int(os.environ.get("LATE_QAT", "1")))
     qat_threshold = float(os.environ.get("QAT_THRESHOLD", "0.5"))  # earlier QAT: 3x more steps
 
-    # TTT: SGD fine-tune on val data after training
-    ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
-    ttt_lr = float(os.environ.get("TTT_LR", "0.0005"))
-    ttt_epochs = int(os.environ.get("TTT_EPOCHS", "10"))
-    ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
-    ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
-    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 0))
-    ttt_mlp_only = bool(int(os.environ.get("TTT_MLP_ONLY", "0")))
-    ttt_cosine_decay = bool(int(os.environ.get("TTT_COSINE_DECAY", "1")))
     xsa_layers = int(os.environ.get("XSA_LAYERS", "4"))
 
 
@@ -1123,94 +1114,6 @@ class GPT(nn.Module):
 
 
 # -----------------------------
-# TEST-TIME TRAINING (TTT)
-# -----------------------------
-
-def ttt_adapt(
-    args: Hyperparameters,
-    base_model: nn.Module,
-    device: torch.device,
-    val_tokens: Tensor,
-    rank: int = 0,
-    world_size: int = 1,
-    log_fn=None,
-) -> None:
-    """SGD fine-tune on validation data; all blocks unfrozen unless ttt_freeze_blocks > 0."""
-    seq_len = args.train_seq_len
-    total_seqs = (val_tokens.numel() - 1) // seq_len
-    batch_seqs = args.ttt_batch_seqs
-
-    if args.ttt_mlp_only:
-        for name, p in base_model.named_parameters():
-            if 'up_proj' not in name and 'down_proj' not in name and 'gate_proj' not in name and 'scale' not in name and 'bias' not in name:
-                if 'mlp' not in name.lower():
-                    p.requires_grad_(False)
-    elif args.ttt_freeze_blocks > 0:
-        for i, block in enumerate(base_model.blocks):
-            if i < args.ttt_freeze_blocks:
-                for p in block.parameters():
-                    p.requires_grad_(False)
-
-    ttt_params = [p for p in base_model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
-    ttt_scheduler = None
-    if args.ttt_cosine_decay:
-        ttt_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.ttt_epochs, eta_min=args.ttt_lr * 0.1)
-
-    my_start = (total_seqs * rank) // world_size
-    my_end = (total_seqs * (rank + 1)) // world_size
-
-    base_model.train()
-    t0 = time.perf_counter()
-
-    for epoch in range(args.ttt_epochs):
-        epoch_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
-        epoch_tokens = torch.zeros((), device=device, dtype=torch.float64)
-
-        for batch_start in range(my_start, my_end, batch_seqs):
-            batch_end = min(batch_start + batch_seqs, my_end)
-            raw_start = batch_start * seq_len
-            raw_end = batch_end * seq_len + 1
-            local = val_tokens[raw_start:raw_end].to(device=device, dtype=torch.int64, non_blocking=True)
-            x = local[:-1].reshape(-1, seq_len)
-            y = local[1:].reshape(-1, seq_len)
-
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss = base_model(x, y)
-            loss.backward()
-
-            if world_size > 1:
-                for p in ttt_params:
-                    if p.grad is not None:
-                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-
-            torch.nn.utils.clip_grad_norm_(ttt_params, 1.0)
-            optimizer.step()
-
-            epoch_loss_sum += loss.detach().to(torch.float64) * float(y.numel())
-            epoch_tokens += float(y.numel())
-
-        if world_size > 1:
-            dist.all_reduce(epoch_loss_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(epoch_tokens, op=dist.ReduceOp.SUM)
-
-        elapsed = time.perf_counter() - t0
-        epoch_avg_loss = epoch_loss_sum.item() / max(epoch_tokens.item(), 1)
-        if ttt_scheduler is not None:
-            ttt_scheduler.step()
-        if log_fn:
-            log_fn(f"ttt_epoch:{epoch+1}/{args.ttt_epochs} loss:{epoch_avg_loss:.4f} time:{elapsed:.1f}s")
-
-    # Re-enable all gradients
-    for p in base_model.parameters():
-        p.requires_grad_(True)
-
-    if log_fn:
-        log_fn(f"ttt:done elapsed={time.perf_counter()-t0:.1f}s")
-
-
-# -----------------------------
 # TRAINING
 # -----------------------------
 
@@ -1414,7 +1317,7 @@ def main() -> None:
     log0(f"tie_embeddings:{args.tie_embeddings} embed_lr:{token_lr} head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr} decoder_lr_mult:{args.decoder_lr_mult}")
     log0(f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} iterations:{args.iterations} warmup_steps:{args.warmup_steps} max_wallclock_seconds:{args.max_wallclock_seconds:.3f}")
     log0(f"rope_dims:{args.rope_dims} ln_scale:{args.ln_scale}")
-    log0(f"muon_wd:{args.muon_wd} adam_wd:{args.adam_wd} ema_enabled:{args.ema_enabled} late_qat:{args.late_qat} ttt_enabled:{args.ttt_enabled}")
+    log0(f"muon_wd:{args.muon_wd} adam_wd:{args.adam_wd} ema_enabled:{args.ema_enabled} late_qat:{args.late_qat}")
     log0(f"bigram_buckets:{args.bigram_buckets} bigram_embed_dim:{args.bigram_embed_dim} seed:{args.seed}")
 
     # -----------------------------
@@ -1611,21 +1514,9 @@ def main() -> None:
         log0("weight_avg:skipped (no EMA or SWA state)")
 
     # -----------------------------
-    # TTT: fine-tune on val data AFTER EMA/SWA, BEFORE quantization
+    # (TTT removed — illegal per issue #402)
     # -----------------------------
 
-    if args.ttt_enabled:
-        if distributed:
-            dist.barrier()
-        log0(f"ttt:start lr={args.ttt_lr} momentum={args.ttt_momentum} epochs={args.ttt_epochs} freeze_blocks={args.ttt_freeze_blocks}")
-        t_ttt = time.perf_counter()
-        ttt_adapt(
-            args, base_model, device, val_tokens,
-            rank=rank, world_size=world_size, log_fn=log0,
-        )
-        log0(f"ttt:elapsed={time.perf_counter() - t_ttt:.1f}s")
-        if distributed:
-            dist.barrier()
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
