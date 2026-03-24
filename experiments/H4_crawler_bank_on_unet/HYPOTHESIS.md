@@ -62,13 +62,30 @@ fewer steps), the crawler bank is not worth it.
 2. Steps achieved (B will get slightly fewer)
 3. Quant gap — does the shared block produce harder-to-quantize activations?
 
+## Results (2026-03-24, 8xH100 SXM, 0.25 scale)
+
+| Arm | Steps | step_avg | val@500 | val@1000 | val@1500 | post_ema | sliding_bpb | artifact |
+|-----|-------|----------|---------|----------|----------|----------|-------------|----------|
+| A (control) | 1,744 | 86ms | 1.3980 | 1.3071 | 1.2475 | 1.2308 | **1.2145** | 14.54MB |
+| B (crawler) | 1,507 | 99ms | 1.3958 | 1.2936 | 1.2318 | 1.2506 | 1.2371 | 14.08MB |
+
 ## Verdict
-_To be filled after runs complete._
 
-| Arm | Steps | val@500 | final_val | post_ema | sliding_bpb | quant_gap |
-|-----|-------|---------|-----------|----------|-------------|-----------|
-| A | | | | | | |
-| B | | | | | | |
+**REFUTED.** Crawler bank loses by 0.023 sliding BPB despite better per-step learning.
 
-## Status
-READY — needs code modification to GS v7 training script.
+Per-step learning IS better with the crawler bank:
+- +0.002 at step 500, +0.014 at step 1000, +0.016 at step 1500
+- Weight sharing at the bottleneck genuinely improves per-step quality
+
+But in a wallclock-limited competition:
+- 15% slower per step → 14% fewer total steps (1507 vs 1744)
+- post_ema 0.020 worse (EMA struggles with shared block dynamics)
+- Quantization 0.023 worse (shared block activations harder for GPTQ)
+- The step count + quant penalty overwhelms the per-step advantage
+
+Artifact is 0.46MB smaller with crawler (weight sharing compresses well).
+This is the only advantage, and it doesn't help when BPB is worse.
+
+**Conclusion: in wallclock-limited training, steps beat tricks.** The crawler
+concept is a genuine regularizer but its compute cost exceeds its benefit.
+The GS v7 U-Net without modifications remains the strongest frame.
