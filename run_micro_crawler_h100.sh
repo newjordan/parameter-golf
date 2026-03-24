@@ -41,7 +41,7 @@ export CRAWLER_MLP_MULT=4
 export CRAWLER_CADENCE_EARLY=2      # scale>0.5: C/N (heavy crawl, establish pattern)
 export CRAWLER_CADENCE_MAIN=4       # 0.2<scale<0.5: C/N/N/N (balanced)
 export CRAWLER_CADENCE_LATE=6       # scale<0.2: C/N/N/N/N/N (fine-tuning, minimal crawl)
-export MODEL_DIM=640
+export MODEL_DIM=624
 export NUM_HEADS=10
 export NUM_KV_HEADS=5
 export MLP_MULT=4
@@ -112,13 +112,13 @@ export SEED=1337
 export RUN_ID="micro_crawler_3f1cx2_d800_$(date +%Y%m%d_%H%M%S)"
 
 echo "═══════════════════════════════════════════════════════════════════"
-echo "MICRO CRAWLER H100 — 4flat + 2crawl×2 = 8 effective, dim=640"
+echo "MICRO CRAWLER H100 — 4flat + 2crawl×2 = 8 effective, dim=624"
 echo "Run ID: $RUN_ID"
 echo "═══════════════════════════════════════════════════════════════════"
 
-# Estimate params: 6 blocks × 11 × 640² + 1024×640 + trigram ≈ 28.0M
-echo "Estimated params: ~28M (6 stored blocks at dim=640, MLP 4x)"
-echo "Expected artifact: ~15.1MB (int6+zstd)"
+# Estimate params: 6 blocks × 11 × 624² + 1024×624 + trigram ≈ 26.7M
+echo "Estimated params: ~27M (6 stored blocks at dim=624, MLP 4x)"
+echo "Expected artifact: ~14.5MB (int6+zstd)"
 echo ""
 
 torchrun --nproc_per_node=8 train_gpt_micro_crawler_h100.py

@@ -1395,6 +1395,8 @@ def main() -> None:
         if max_wallclock_ms is None:
             warmdown_start = max(args.iterations - args.warmdown_iters, 0)
             return max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0) if warmdown_start <= step < args.iterations else 1.0
+        if step <= 50:
+            return 1.0
         step_ms = elapsed_ms / max(step, 1)
         warmdown_ms = args.warmdown_iters * step_ms
         remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
