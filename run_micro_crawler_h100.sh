@@ -37,8 +37,10 @@ export NUM_FLAT_LAYERS=4
 export NUM_CRAWLER_LAYERS=2
 export CRAWLER_LOOPS=2
 export CRAWLER_MLP_MULT=4
-export CRAWLER_CADENCE=5            # N/N/N/N/C — 4 clean steps then 1 crawl
-export CRAWLER_CADENCE_OFFSET=4
+# Recursive cadence: ramps N count as LR warms down
+export CRAWLER_CADENCE_EARLY=2      # scale>0.5: C/N (heavy crawl, establish pattern)
+export CRAWLER_CADENCE_MAIN=4       # 0.2<scale<0.5: C/N/N/N (balanced)
+export CRAWLER_CADENCE_LATE=6       # scale<0.2: C/N/N/N/N/N (fine-tuning, minimal crawl)
 export MODEL_DIM=640
 export NUM_HEADS=10
 export NUM_KV_HEADS=5

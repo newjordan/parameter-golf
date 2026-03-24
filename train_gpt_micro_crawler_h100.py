@@ -47,8 +47,13 @@ class Hyperparameters:
     num_crawler_layers = int(os.environ.get("NUM_CRAWLER_LAYERS", 2))  # shared blocks, loop
     crawler_loops = int(os.environ.get("CRAWLER_LOOPS", 2))     # how many times crawler fires
     crawler_mlp_mult = float(os.environ.get("CRAWLER_MLP_MULT", 4.0))
-    crawler_cadence = int(os.environ.get("CRAWLER_CADENCE", 5))  # 0=never crawl, 1=always, N=crawl every Nth step
-    crawler_cadence_offset = int(os.environ.get("CRAWLER_CADENCE_OFFSET", 4))  # N/N/N/N/C
+    # Recursive cadence: N count ramps as LR warms down
+    # Early training (scale>0.5): cadence 2 (C/N) — heavy crawl
+    # Main training (0.2<scale<0.5): cadence 4 (C/N/N/N) — balanced
+    # Late training (scale<0.2): cadence 6 (C/N/N/N/N/N) — mostly normalize
+    crawler_cadence_early = int(os.environ.get("CRAWLER_CADENCE_EARLY", 2))
+    crawler_cadence_main = int(os.environ.get("CRAWLER_CADENCE_MAIN", 4))
+    crawler_cadence_late = int(os.environ.get("CRAWLER_CADENCE_LATE", 6))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 5))
     model_dim = int(os.environ.get("MODEL_DIM", 640))
     num_heads = int(os.environ.get("NUM_HEADS", 10))
@@ -1464,6 +1469,14 @@ def main() -> None:
         if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+        # Log cadence phase transitions
+        if not hasattr(main, '_last_cadence_phase'):
+            main._last_cadence_phase = None
+        phase = "early" if scale > 0.5 else ("main" if scale > 0.2 else "late")
+        if phase != main._last_cadence_phase:
+            c = args.crawler_cadence_early if scale > 0.5 else (args.crawler_cadence_main if scale > 0.2 else args.crawler_cadence_late)
+            log0(f"cadence_phase:{phase} cadence:{c} step:{step} scale:{scale:.4f}")
+            main._last_cadence_phase = phase
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1477,13 +1490,14 @@ def main() -> None:
                 train_loader._ttt_buffer.append((x.detach().clone(), y.detach().clone()))
                 if len(train_loader._ttt_buffer) > args.ttt_burst_steps:
                     train_loader._ttt_buffer.pop(0)
-            # Cadence: decide if crawler fires all loops or normalizes
-            if args.crawler_cadence == 0:
-                is_crawl = False
-            elif args.crawler_cadence == 1:
-                is_crawl = True
+            # Recursive cadence: N count ramps as LR warms down
+            if scale > 0.5:
+                cadence = args.crawler_cadence_early   # heavy crawl (default 2: C/N)
+            elif scale > 0.2:
+                cadence = args.crawler_cadence_main    # balanced (default 4: C/N/N/N)
             else:
-                is_crawl = ((step - 1) % args.crawler_cadence) == args.crawler_cadence_offset
+                cadence = args.crawler_cadence_late    # fine-tuning (default 6: C/N/N/N/N/N)
+            is_crawl = ((step - 1) % cadence) == 0 if cadence > 0 else False
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y, crawl=is_crawl)
             train_loss += loss.detach()
