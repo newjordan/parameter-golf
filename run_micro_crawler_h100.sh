@@ -41,14 +41,14 @@ export CRAWLER_MLP_MULT=4
 export CRAWLER_CADENCE_EARLY=2      # scale>0.5: C/N (heavy crawl, establish pattern)
 export CRAWLER_CADENCE_MAIN=4       # 0.2<scale<0.5: C/N/N/N (balanced)
 export CRAWLER_CADENCE_LATE=6       # scale<0.2: C/N/N/N/N/N (fine-tuning, minimal crawl)
-export MODEL_DIM=560
+export MODEL_DIM=640
 export NUM_HEADS=10
 export NUM_KV_HEADS=5
 export MLP_MULT=4
 export VOCAB_SIZE=1024
 
 # ── Input conditioning ──
-export TRIGRAM_VOCAB_SIZE=8192
+export TRIGRAM_VOCAB_SIZE=2048
 export TRIGRAM_DIM=128
 
 # ── Features ──
