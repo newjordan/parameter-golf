@@ -750,8 +750,14 @@ class GPT(nn.Module):
                 head_dim = model_dim // num_heads
                 self.crawler_bank.attn.rope_dims = rope_dims
                 self.crawler_bank.attn.rotary = Rotary(head_dim, base=rope_base, train_seq_len=1024, rope_dims=rope_dims)
+            # Skiptrace: cached crawler delta with learned decay
+            self.crawler_decay_logit = nn.Parameter(torch.tensor(2.0))   # sigmoid(2)≈0.88 per step
+            self.crawler_inject_scale = nn.Parameter(torch.tensor(0.0))  # starts at 0 (no injection)
         else:
             self.crawler_bank = None
+        # Runtime state (not saved, not parameters)
+        self._crawler_cache = None
+        self._crawler_cache_age = 0
         self._init_weights()
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -788,10 +794,22 @@ class GPT(nn.Module):
             ve = self._get_ve(i, input_ids, ve_cache)
             x = self.blocks[i](x, x0, v_embed=ve)
             skips.append(x)
-        # Crawler bank: shared block loops at bottleneck (cadence-gated)
-        if self.crawler_bank is not None and self._bank_active:
-            for _ in range(self.crawler_bank_loops):
-                x = self.crawler_bank(x, x0)
+        # Crawler bank with skiptrace: fire periodically, inject cached delta between firings
+        if self.crawler_bank is not None:
+            if self._bank_active:
+                # Fire the bank — compute and cache the delta
+                x_pre = x
+                for _ in range(self.crawler_bank_loops):
+                    x = self.crawler_bank(x, x0)
+                self._crawler_cache = (x - x_pre).detach()
+                self._crawler_cache_age = 0
+            elif self._crawler_cache is not None:
+                # Inject cached delta with learned decay
+                decay = torch.sigmoid(self.crawler_decay_logit)
+                inject = torch.sigmoid(self.crawler_inject_scale)
+                weight = inject * decay ** self._crawler_cache_age
+                x = x + weight * self._crawler_cache
+                self._crawler_cache_age += 1
         for i in range(self.num_decoder_layers):
             bi = self.num_encoder_layers + i
             if skips:
@@ -840,8 +858,8 @@ class GPT(nn.Module):
             ve = self._get_ve(i, input_ids, ve_cache)
             x = self.blocks[i](x, x0, v_embed=ve)
             skips.append(x)
-        # Crawler bank: shared block loops at bottleneck (cadence-gated)
-        if self.crawler_bank is not None and self._bank_active:
+        # Crawler bank: always fire during eval (no caching)
+        if self.crawler_bank is not None:
             for _ in range(self.crawler_bank_loops):
                 x = self.crawler_bank(x, x0)
         for i in range(self.num_decoder_layers):
