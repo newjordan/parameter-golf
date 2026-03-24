@@ -744,36 +744,21 @@ class GPT(nn.Module):
             self.ve_shared = None
             self.ve_layer_scales = nn.ParameterList()
         self.value_embeds = nn.ModuleList()
-        # Orthogonal loop positions for crawler (QR-initialized)
+        # H4: Simple sequential looping — no PD gate, just orthogonal loop positions
+        # Testing whether weight-shared depth at bottleneck helps, not deliberation
         if num_crawler_layers > 0 and crawler_loops > 1:
             n_pos = crawler_loops
             raw = torch.randn(n_pos, model_dim)
             Q, _ = torch.linalg.qr(raw.T)
             ortho = Q.T[:n_pos]
             self.loop_pos = nn.Parameter(ortho * 0.01)
-            # Persistent deliberation: bidirectional gradient flow
-            # Gate compares inputs, consensus_ref is a learned Parameter (not detached EMA)
-            # Gradients flow IN to ref (from loss) and OUT through ref (to crawler blocks)
-            self.delib_gate = CastedLinear(model_dim * 2, model_dim, bias=False)
-            nn.init.zeros_(self.delib_gate.weight)
-            self.delib_scale = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
-            self.consensus_ref = nn.Parameter(torch.zeros(1, 1, model_dim))
-            # Polar decomposition: separate magnitude/direction gates for the double firing
-            if polar_enabled:
-                self.polar_mag_gate = nn.Linear(model_dim * 2, 1, bias=True)
-                nn.init.zeros_(self.polar_mag_gate.weight)
-                nn.init.constant_(self.polar_mag_gate.bias, 0.0)  # sigmoid(0)=0.5 → equal blend
-                self.polar_dir_gate = CastedLinear(model_dim * 2, model_dim, bias=False)
-                nn.init.zeros_(self.polar_dir_gate.weight)
-            else:
-                self.polar_mag_gate = None
-                self.polar_dir_gate = None
         else:
             self.loop_pos = None
-            self.delib_gate = None
-            self.delib_scale = None
-            self.polar_mag_gate = None
-            self.polar_dir_gate = None
+        self.delib_gate = None
+        self.delib_scale = None
+        self.consensus_ref = None
+        self.polar_mag_gate = None
+        self.polar_dir_gate = None
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -854,10 +839,14 @@ class GPT(nn.Module):
         Even with tapered cadence, N steps keep the channel alive through gradient.
         When polar_enabled: blending uses polar decomposition (magnitude + direction)
         to avoid energy loss from Cartesian interpolation of divergent firing vectors."""
-        if self.loop_pos is None or self.delib_gate is None:
-            for ci, block in enumerate(self.crawler_blocks):
-                ve = self._get_crawler_ve(ci, input_ids, ve_cache)
-                x = block(x, x0, v_embed=ve)
+        if self.delib_gate is None:
+            # H4: simple sequential looping — each pass adds orthogonal offset
+            for loop in range(self.crawler_loops):
+                x_loop = x + self.loop_pos[loop] if self.loop_pos is not None else x
+                for ci, block in enumerate(self.crawler_blocks):
+                    ve = self._get_crawler_ve(ci, input_ids, ve_cache)
+                    x_loop = block(x_loop, x0, v_embed=ve)
+                x = x_loop
             return x
         scale = self.delib_scale.to(dtype=x.dtype)
         ref = self.consensus_ref.expand_as(x)  # [1,1,dim] → [B,T,dim], gradient flows
