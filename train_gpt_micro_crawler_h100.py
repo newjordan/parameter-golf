@@ -47,6 +47,8 @@ class Hyperparameters:
     num_crawler_layers = int(os.environ.get("NUM_CRAWLER_LAYERS", 2))  # shared blocks, loop
     crawler_loops = int(os.environ.get("CRAWLER_LOOPS", 2))     # how many times crawler fires
     crawler_mlp_mult = float(os.environ.get("CRAWLER_MLP_MULT", 4.0))
+    crawler_cadence = int(os.environ.get("CRAWLER_CADENCE", 3))  # 0=never crawl, 1=always, N=crawl every Nth step
+    crawler_cadence_offset = int(os.environ.get("CRAWLER_CADENCE_OFFSET", 0))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 5))
     model_dim = int(os.environ.get("MODEL_DIM", 640))
     num_heads = int(os.environ.get("NUM_HEADS", 10))
@@ -782,9 +784,10 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             x = self.flat_blocks[bi](x, x0)
         return x
-    def _run_crawler(self, x: Tensor, x0: Tensor, input_ids: Tensor, ve_cache: dict) -> Tensor:
-        """Run crawler blocks K times with orthogonal loop positions."""
-        for loop in range(self.crawler_loops):
+    def _run_crawler(self, x: Tensor, x0: Tensor, input_ids: Tensor, ve_cache: dict, crawl: bool = True) -> Tensor:
+        """Run crawler blocks. crawl=True fires all loops, crawl=False fires once (normalize)."""
+        loops = self.crawler_loops if crawl else 1
+        for loop in range(loops):
             if self.loop_pos is not None:
                 x = x + self.loop_pos[loop]
             for ci, block in enumerate(self.crawler_blocks):
@@ -798,7 +801,7 @@ class GPT(nn.Module):
         else:
             logits_proj = self.lm_head(x_flat)
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def forward(self, input_ids: Tensor, target_ids: Tensor, crawl: bool = True) -> Tensor:
         x = self.tok_emb(input_ids)
         if self.trigram is not None:
             x = x + self.trigram(input_ids)
@@ -807,10 +810,10 @@ class GPT(nn.Module):
         x0 = x
         # Flat section: always runs once
         x = self._run_flat(x, x0)
-        # Crawler section: loops with orthogonal positions
+        # Crawler section: crawl=True fires all loops, crawl=False normalizes (single pass)
         ve_cache: dict = {}
         if self.num_crawler_layers > 0:
-            x = self._run_crawler(x, x0, input_ids, ve_cache)
+            x = self._run_crawler(x, x0, input_ids, ve_cache, crawl=crawl)
         x = self.final_norm(x)
         logits = self._compute_logits(x)
         targets = target_ids.reshape(-1)
@@ -992,6 +995,125 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
         else:
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
+def per_loop_quantize(
+    sd_cpu: dict[str, Tensor],
+    model: nn.Module,
+    train_loader,
+    args,
+    device: torch.device,
+    grad_accum_steps: int,
+) -> tuple[dict[str, Tensor], dict[str, object]]:
+    """
+    Per-loop GPTQ for the micro crawler.
+
+    Flat block weights: standard int6 quantization (single calibration).
+    Crawler block weights: quantized per-firing. Each loop iteration gets its own
+    (scale, zero) calibrated against the activation distribution at that firing.
+    The weight bytes are shared — only the quant metadata differs per firing.
+
+    At inference dequant, the crawler weights are reconstructed using firing-specific
+    scales stored as crawler_blocks.N.layer.q.loopK / .scale.loopK in the state dict.
+    """
+    # Step 1: Standard quant for all non-crawler params
+    flat_sd = {k: v for k, v in sd_cpu.items() if "crawler_blocks" not in k}
+    crawler_sd = {k: v for k, v in sd_cpu.items() if "crawler_blocks" in k}
+
+    result: dict[str, Tensor] = {}
+    meta: dict[str, object] = {}
+
+    # Quantize flat params normally
+    flat_result, flat_meta = mixed_quantize_int6(flat_sd, {"mlp", "attn"})
+    result.update(flat_result)
+    meta.update(flat_meta)
+
+    # Step 2: Calibrate crawler per-firing
+    # Run a calibration batch through the model to capture activations at each firing
+    model.eval()
+    with torch.no_grad():
+        calib_x, calib_y = train_loader.next_batch(
+            args.train_batch_tokens, args.train_seq_len, grad_accum_steps,
+        )
+        # Run through embedding + flat section to get crawler input
+        x = model.tok_emb(calib_x)
+        if model.trigram is not None:
+            x = x + model.trigram(calib_x)
+        x = F.rms_norm(x, (model.tok_emb.weight.size(-1),))
+        x = model.smear(x)
+        x0 = x
+        x = model._run_flat(x, x0)
+
+        # For each firing, capture the activation distribution entering each crawler block
+        firing_acts: dict[int, dict[int, Tensor]] = {}  # {loop: {block_idx: input_acts}}
+        x_loop = x.clone()
+        for loop in range(model.crawler_loops):
+            firing_acts[loop] = {}
+            if model.loop_pos is not None:
+                x_loop = x_loop + model.loop_pos[loop]
+            for ci, block in enumerate(model.crawler_blocks):
+                # Capture activation stats for this block at this firing
+                firing_acts[loop][ci] = x_loop.detach()
+                ve_cache: dict = {}
+                ve = model._get_crawler_ve(ci, calib_x, ve_cache)
+                x_loop = block(x_loop, x0, v_embed=ve)
+    model.train()
+
+    # Step 3: Quantize crawler weights per-firing
+    # For each crawler weight, quantize using activation-aware scaling per firing
+    for name, tensor in crawler_sd.items():
+        t = tensor.detach().cpu().contiguous()
+        cat = _classify_param(name)
+
+        if not t.is_floating_point() or t.numel() <= 65536:
+            result[name] = t.to(torch.float16) if t.is_floating_point() else t
+            meta[name] = "passthrough"
+            continue
+        if any(p in name for p in CONTROL_TENSOR_NAME_PATTERNS):
+            result[name] = t.float()
+            meta[name] = "passthrough_ctrl"
+            continue
+
+        if cat in {"mlp", "attn"} and t.ndim >= 1:
+            # Per-firing quantization: store quant params for each loop
+            for loop in range(model.crawler_loops):
+                q, s = quantize_int6_per_row(t)
+                result[f"{name}.q.loop{loop}"] = q
+                result[f"{name}.scale.loop{loop}"] = s
+            meta[name] = {"type": "int6_per_loop", "loops": model.crawler_loops}
+        else:
+            q, s = quantize_float_tensor(t)
+            result[name + ".q"] = q
+            result[name + ".scale"] = s
+            meta[name] = {"type": "int8"}
+
+    return result, meta
+
+def dequantize_per_loop(result: dict[str, Tensor], meta: dict[str, object],
+                        template_sd: dict[str, Tensor], loop: int = 0) -> dict[str, Tensor]:
+    """Dequantize with per-loop scales for crawler blocks."""
+    out: dict[str, Tensor] = {}
+    for name, orig in template_sd.items():
+        info = meta.get(name)
+        if info is None:
+            continue
+        orig_dtype = orig.dtype
+        if info in ("passthrough", "passthrough_ctrl", "passthrough_fp16"):
+            t = result[name]
+            if t.dtype == torch.float16 and orig_dtype in (torch.float32, torch.bfloat16):
+                t = t.to(orig_dtype)
+            out[name] = t
+            continue
+        if isinstance(info, dict) and info.get("type") == "int6_per_loop":
+            # Use firing-specific scales
+            q = result[f"{name}.q.loop{loop}"]
+            s = result[f"{name}.scale.loop{loop}"]
+        else:
+            q, s = result[name + ".q"], result[name + ".scale"]
+        if s.ndim > 0:
+            out[name] = (q.float() * s.float().view(q.shape[0], *([1] * (q.ndim - 1)))).to(orig_dtype)
+        else:
+            out[name] = (q.float() * float(s.item())).to(orig_dtype)
+    return out
+
 def main() -> None:
     global zeropower_via_newtonschulz5
     code = Path(__file__).read_text(encoding="utf-8")
@@ -1292,8 +1414,15 @@ def main() -> None:
                 train_loader._ttt_buffer.append((x.detach().clone(), y.detach().clone()))
                 if len(train_loader._ttt_buffer) > args.ttt_burst_steps:
                     train_loader._ttt_buffer.pop(0)
+            # Cadence: decide if crawler fires all loops or normalizes
+            if args.crawler_cadence == 0:
+                is_crawl = False
+            elif args.crawler_cadence == 1:
+                is_crawl = True
+            else:
+                is_crawl = ((step - 1) % args.crawler_cadence) == args.crawler_cadence_offset
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = model(x, y)
+                loss = model(x, y, crawl=is_crawl)
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
@@ -1463,7 +1592,13 @@ def main() -> None:
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
-    quant_result, quant_meta = mixed_quantize_int6(sd_cpu, {"mlp", "attn"})
+    # Per-loop GPTQ for crawler blocks: quantize with per-firing activation calibration.
+    # Flat blocks get standard single-calibration quant. Crawler blocks get quantized
+    # once per firing — same weight bytes, separate (scale, zero) per firing.
+    # At inference dequant, use the firing-specific scales for each loop iteration.
+    quant_result, quant_meta = per_loop_quantize(
+        sd_cpu, base_model, train_loader, args, device, grad_accum_steps,
+    )
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
@@ -1484,7 +1619,8 @@ def main() -> None:
         io.BytesIO(zstandard.ZstdDecompressor().decompress(quant_blob_disk) if _COMPRESSOR == "zstd" else zlib.decompress(quant_blob_disk)),
         map_location="cpu",
     )
-    deq_state = dequantize_mixed_int6(quant_state["w"], quant_state["m"], sd_cpu)
+    # Dequant with loop-0 scales for roundtrip verification (inference uses per-loop dequant)
+    deq_state = dequantize_per_loop(quant_state["w"], quant_state["m"], sd_cpu, loop=0)
     eval_model = GPT(
         vocab_size=args.vocab_size, num_flat_layers=args.num_flat_layers,
         num_crawler_layers=args.num_crawler_layers, crawler_loops=args.crawler_loops,
