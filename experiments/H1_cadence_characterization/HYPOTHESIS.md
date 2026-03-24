@@ -55,19 +55,51 @@ XSA_LAST_N=2  VE_LAYERS=0,1
 |-------|---------|----------|----------|-------------|-----------|
 | 3828 | 1.4017 | 1.1853 | 1.1794 | **1.1603** | 0.004 |
 
-Note: cad0 full-scale used diagnostic script (156ms/step), NOT production script.
-Run 8 (cadence 2, production script) got 7076 steps in 600s at ~85ms/step.
-Comparison is confounded by step count difference. Clean A/B pending.
+Note: cad0 diag-script run was confounded (different script, fewer steps). See production run below.
+
+### cad0 Full Scale — PRODUCTION SCRIPT (apples-to-apples vs Run 8)
+| | Run 8 (cad2) | cad0 (no C) | Delta |
+|---|---|---|---|
+| Script | production | **production** | **same** |
+| Steps | 7,076 | **7,856** | +11% |
+| step_avg | ~85ms | **76ms** | faster |
+| Peak memory | 33,182 MiB | **22,854 MiB** | **-31%** |
+| post_ema | 1.1535 | **1.1487** | -0.005 |
+| **sliding_window** | **1.1355** | **1.1325** | **-0.003** |
+| quant_gap | 0.0075 | 0.0070 | -0.0005 |
+
+Learning curve (cad0 production, no C-steps):
+```
+step  500: 1.4032    step 4000: 1.2366
+step 1000: 1.3234    step 4500: 1.2315
+step 1500: 1.2984    step 5000: 1.2286
+step 2000: 1.2678    step 5500: 1.2204
+step 2500: 1.2537    step 6000: 1.2102
+step 3000: 1.2449    step 6500: 1.1946
+step 3500: 1.2405    step 7000: 1.1809
+                     step 7500: 1.1622
+                     step 7856: 1.1512
+```
 
 ## Verdict
 
-**PREDICTION PARTIALLY REFUTED.** No U-shape found at 0.25 scale.
+**PREDICTION REFUTED. Recursion is net overhead at all tested scales.**
 
-At 0.25 scale (150s), less recursion is monotonically better:
-- val@500 is identical across all cadences (1.3838-1.3842) — C-steps are neutral per step
+At 0.25 scale (150s, ~800 steps):
+- val@500 identical across cadences — C-steps neutral per step
 - More steps in same wallclock → better final BPB
-- Quant gap shrinks monotonically: 0.136 → 0.081 → 0.061 → 0.059
-- Winner: **cad4** (1.3836 sliding)
+- Quant gap shrinks monotonically: 0.136 → 0.059
+- Winner: cad4 (1.3836 sliding)
 
-Open question: does recursion compound at full scale (7000 steps)?
-Production-script cad0 vs Run 8 test pending.
+At 1.0 scale (600s, ~7800 steps, PRODUCTION SCRIPT):
+- **cad0 (no C-steps) beats Run 8 by 0.003 BPB** (1.1325 vs 1.1355)
+- 11% more steps (no C-step compute overhead)
+- 31% less memory (no double-firing activation storage)
+- Quant gap slightly better (0.0070 vs 0.0075)
+- Recursion does NOT compound at 7000 steps
+
+**The C-step double-firing mechanism provides zero measurable benefit.**
+The architecture's value comes from weight sharing, trigram embedding, XSA,
+VE injection, GPTQ, SWA, TTT burst, and self-distillation — not recursion.
+
+Next step: isolate and validate each remaining component.

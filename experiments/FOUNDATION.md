@@ -43,9 +43,9 @@ Every near-term run must contribute to:
 
 | Front | Question | Status |
 |-------|----------|--------|
-| **H1** | What does cadence do to BPB on a balanced 4x2 system? | PENDING |
-| **H2** | Does optimal cadence change on a 6x2 system? | PENDING |
-| **H3** | Should each crawler block have its own cadence (shape of recursive pressure)? | BLOCKED on H1+H2 |
+| **H1** | What does cadence do to BPB on a balanced 4x2 system? | **COMPLETE — recursion is overhead** |
+| **H2** | Does optimal cadence change on a 6x2 system? | **COMPLETE — yes, 6x2 more sensitive** |
+| **H3** | Should each crawler block have its own cadence (shape of recursive pressure)? | **DEPRIORITIZED — recursion itself is net negative** |
 
 ## Measurement Protocol
 
