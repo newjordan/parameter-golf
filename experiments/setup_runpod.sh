@@ -101,7 +101,8 @@ assert torch.cuda.is_available(), 'No CUDA'
 cap = torch.cuda.get_device_capability()
 assert cap[0] >= 9, f'Need SM90+ (Hopper), got SM{cap[0]}{cap[1]}'
 print(f'CUDA: {torch.cuda.device_count()}x {torch.cuda.get_device_name(0)}')
-print(f'Memory per GPU: {torch.cuda.get_device_properties(0).total_mem // 1024**3} GB')
+mem = getattr(torch.cuda.get_device_properties(0), 'total_memory', None) or torch.cuda.get_device_properties(0).total_mem
+print(f'Memory per GPU: {mem // 1024**3} GB')
 
 # Imports
 from flash_attn_interface import flash_attn_func
