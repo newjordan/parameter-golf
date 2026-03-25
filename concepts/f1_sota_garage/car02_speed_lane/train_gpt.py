@@ -115,6 +115,12 @@ class Hyperparameters:
     ngram_eval_alpha = float(os.environ.get("NGRAM_EVAL_ALPHA", 0.20))
     ngram_eval_min_count = int(os.environ.get("NGRAM_EVAL_MIN_COUNT", 2))
     ngram_eval_buckets = int(os.environ.get("NGRAM_EVAL_BUCKETS", 4_194_304))
+    compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
+    compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
+def maybe_torch_compile(obj, args: Hyperparameters):
+    if not args.compile_enabled:
+        return obj
+    return torch.compile(obj, dynamic=False, fullgraph=args.compile_fullgraph)
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
@@ -899,7 +905,7 @@ def eval_val_sliding(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
     base_model.eval()
-    compiled_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
+    compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
     with torch.inference_mode():
         for bi in range(0, len(my_windows), batch_seqs):
             batch_ws = my_windows[bi:bi + batch_seqs]
@@ -990,7 +996,7 @@ def eval_val_sliding_hashed_ngram(
     byte_count = 0.0
 
     base_model.eval()
-    compiled_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
+    compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
     t0 = time.perf_counter()
     with torch.inference_mode():
         for bi in range(0, len(window_starts), batch_seqs):
@@ -1445,7 +1451,8 @@ def main() -> None:
     global zeropower_via_newtonschulz5
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
-    zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
+    if args.compile_enabled:
+        zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -1548,7 +1555,7 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    compiled_model = maybe_torch_compile(base_model, args)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
     block_named_params = list(base_model.blocks.named_parameters())
     matrix_params = [
@@ -1642,6 +1649,7 @@ def main() -> None:
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
+    log0(f"compile:enabled={int(args.compile_enabled)} fullgraph={int(args.compile_fullgraph)}")
     log0(f"seed:{args.seed}")
     if args.ngram_eval_order >= 2:
         log0(
@@ -1818,7 +1826,7 @@ def main() -> None:
         teacher_model.eval()
         for p in teacher_model.parameters():
             p.requires_grad_(False)
-        compiled_teacher_logits = torch.compile(teacher_model.forward_logits, dynamic=False, fullgraph=True)
+        compiled_teacher_logits = maybe_torch_compile(teacher_model.forward_logits, args)
         model.train()
         T = args.distill_temperature
         alpha = args.distill_alpha
@@ -1938,7 +1946,7 @@ def main() -> None:
             m.float()
     restore_low_dim_params_to_fp32(eval_model)
     eval_model.load_state_dict(deq_state, strict=True)
-    compiled_eval = torch.compile(eval_model, dynamic=False, fullgraph=True)
+    compiled_eval = maybe_torch_compile(eval_model, args)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
     q_val_loss, q_val_bpb = eval_val(
