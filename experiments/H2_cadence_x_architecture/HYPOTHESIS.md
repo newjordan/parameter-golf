@@ -59,6 +59,9 @@ After both fronts complete, compare:
 ### Inverse Architecture: 2f+4cx2 (NPROC=1, INVALID)
 Ran with NPROC=1 by mistake — only 98 steps in 150s. Data unusable. Needs 8 GPU rerun.
 
+## Status
+COMPLETED — cadence sensitivity characterized; recursion remains non-primary.
+
 ## Verdict
 
 **PREDICTION CONFIRMED — cadence sensitivity IS architecture-dependent.**

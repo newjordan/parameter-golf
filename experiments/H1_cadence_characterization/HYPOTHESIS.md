@@ -81,6 +81,9 @@ step 3500: 1.2405    step 7000: 1.1809
                      step 7856: 1.1512
 ```
 
+## Status
+COMPLETED — recursion/cadence mechanism is deprecated for the primary race path.
+
 ## Verdict
 
 **PREDICTION REFUTED. Recursion is net overhead at all tested scales.**

@@ -69,6 +69,9 @@ fewer steps), the crawler bank is not worth it.
 | A (control) | 1,744 | 86ms | 1.3980 | 1.3071 | 1.2475 | 1.2308 | **1.2145** | 14.54MB |
 | B (crawler) | 1,507 | 99ms | 1.3958 | 1.2936 | 1.2318 | 1.2506 | 1.2371 | 14.08MB |
 
+## Status
+COMPLETED — crawler bank at U-Net bottleneck is retired for 10-minute track.
+
 ## Verdict
 
 **REFUTED.** Crawler bank loses by 0.023 sliding BPB despite better per-step learning.

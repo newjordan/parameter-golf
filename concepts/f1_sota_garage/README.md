@@ -14,6 +14,11 @@ This garage is a clean three-car workspace cloned from the latest F1 gold-standa
 
 All three start from the same legal SOTA baseline so you can compare changes apples-to-apples.
 
+## Research Tagging
+
+Each car folder carries a `HYPOTHESIS.md` with explicit question, prediction,
+status, and verdict so runs remain auditable.
+
 ## Quick Run
 
 ```bash

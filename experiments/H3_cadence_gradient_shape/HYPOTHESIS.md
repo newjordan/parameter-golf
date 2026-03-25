@@ -80,3 +80,6 @@ BLOCKED — waiting on H1/H2 results and code change.
   an internal specialization structure analogous to encoder/bottleneck/decoder
 - Opens research direction: can the model learn its own cadence schedule?
   (adaptive per-block gating of C vs N steps)
+
+## Verdict
+PENDING — blocked until per-block cadence support is implemented.
