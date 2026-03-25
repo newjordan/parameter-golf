@@ -115,6 +115,7 @@ class Hyperparameters:
     ngram_eval_alpha = float(os.environ.get("NGRAM_EVAL_ALPHA", 0.20))
     ngram_eval_min_count = int(os.environ.get("NGRAM_EVAL_MIN_COUNT", 2))
     ngram_eval_buckets = int(os.environ.get("NGRAM_EVAL_BUCKETS", 4_194_304))
+    ngram_eval_max_seconds = float(os.environ.get("NGRAM_EVAL_MAX_SECONDS", 0.0))
     compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
     compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
 def maybe_torch_compile(obj, args: Hyperparameters):
@@ -960,9 +961,10 @@ def eval_val_sliding_hashed_ngram(
     alpha: float,
     min_count: int,
     buckets: int,
+    max_seconds: float = 0.0,
     batch_seqs: int = 32,
     eval_seq_len: int | None = None,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """Score-first sliding eval with fixed-weight hashed n-gram interpolation.
 
     Legal behavior:
@@ -977,10 +979,18 @@ def eval_val_sliding_hashed_ngram(
         raise ValueError(f"NGRAM_EVAL_MIN_COUNT must be >=1, got {min_count}")
     if buckets < 1024:
         raise ValueError(f"NGRAM_EVAL_BUCKETS must be >=1024, got {buckets}")
+    if max_seconds < 0.0:
+        raise ValueError(f"NGRAM_EVAL_MAX_SECONDS must be >=0, got {max_seconds}")
 
     seq_len = eval_seq_len or args.train_seq_len
     total_tokens = val_tokens.numel() - 1
     window_starts = [ws for ws in range(0, total_tokens, stride) if min(ws + seq_len, total_tokens) - ws >= 1]
+    total_scored_tokens = 0.0
+    for ws in window_starts:
+        end = min(ws + seq_len, total_tokens)
+        wlen = end - ws
+        s = 0 if ws == 0 else max(wlen - stride, 0)
+        total_scored_tokens += float(max(wlen - s, 0))
 
     val_np = val_tokens.numpy()
     ctx_table = np.zeros((buckets,), dtype=np.uint32)
@@ -998,8 +1008,13 @@ def eval_val_sliding_hashed_ngram(
     base_model.eval()
     compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
     t0 = time.perf_counter()
+    deadline = (t0 + max_seconds) if max_seconds > 0.0 else None
+    cutoff_hit = False
     with torch.inference_mode():
         for bi in range(0, len(window_starts), batch_seqs):
+            if deadline is not None and time.perf_counter() >= deadline:
+                cutoff_hit = True
+                break
             batch_ws = window_starts[bi:bi + batch_seqs]
             bsz = len(batch_ws)
             x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
@@ -1080,11 +1095,19 @@ def eval_val_sliding_hashed_ngram(
                     f"({prog*100:.1f}%) bpb={cur_bpb:.6f} t={elapsed:.0f}s",
                     flush=True,
                 )
+    coverage = token_count / max(total_scored_tokens, 1.0)
+    if cutoff_hit:
+        elapsed = time.perf_counter() - t0
+        print(
+            f"ngram_eval:cutoff max_seconds={max_seconds:.1f} "
+            f"coverage={coverage*100:.2f}% elapsed={elapsed:.0f}s",
+            flush=True,
+        )
 
     val_loss = loss_sum / max(token_count, 1.0)
     val_bpb = val_loss / math.log(2.0) * (token_count / max(byte_count, 1.0))
     base_model.train()
-    return val_loss, val_bpb
+    return val_loss, val_bpb, coverage
 def _classify_param(name: str) -> str:
     if "tok_emb" in name or "lm_head" in name:
         return "embed"
@@ -1983,7 +2006,7 @@ def main() -> None:
             if rank == 0:
                 torch.cuda.synchronize()
                 t_ng = time.perf_counter()
-                ng_loss, ng_bpb = eval_val_sliding_hashed_ngram(
+                ng_loss, ng_bpb, ng_coverage = eval_val_sliding_hashed_ngram(
                     args,
                     eval_model,
                     device,
@@ -1996,17 +2019,29 @@ def main() -> None:
                     alpha=args.ngram_eval_alpha,
                     min_count=args.ngram_eval_min_count,
                     buckets=args.ngram_eval_buckets,
+                    max_seconds=args.ngram_eval_max_seconds,
                     eval_seq_len=sw_seq_len,
                 )
                 torch.cuda.synchronize()
-                log0(
-                    f"final_int6_sliding_window_ngram{args.ngram_eval_order} val_loss:{ng_loss:.4f} "
-                    f"val_bpb:{ng_bpb:.4f} eval_time:{1000.0 * (time.perf_counter() - t_ng):.0f}ms"
-                )
-                log0(
-                    f"final_int6_sliding_window_ngram{args.ngram_eval_order}_exact "
-                    f"val_loss:{ng_loss:.8f} val_bpb:{ng_bpb:.8f}"
-                )
+                ng_eval_ms = 1000.0 * (time.perf_counter() - t_ng)
+                if ng_coverage >= 0.999999:
+                    log0(
+                        f"final_int6_sliding_window_ngram{args.ngram_eval_order} val_loss:{ng_loss:.4f} "
+                        f"val_bpb:{ng_bpb:.4f} eval_time:{ng_eval_ms:.0f}ms"
+                    )
+                    log0(
+                        f"final_int6_sliding_window_ngram{args.ngram_eval_order}_exact "
+                        f"val_loss:{ng_loss:.8f} val_bpb:{ng_bpb:.8f}"
+                    )
+                else:
+                    log0(
+                        f"final_int6_sliding_window_ngram{args.ngram_eval_order}_partial val_loss:{ng_loss:.4f} "
+                        f"val_bpb:{ng_bpb:.4f} coverage:{ng_coverage:.4f} eval_time:{ng_eval_ms:.0f}ms"
+                    )
+                    log0(
+                        f"final_int6_sliding_window_ngram{args.ngram_eval_order}_partial_exact "
+                        f"val_loss:{ng_loss:.8f} val_bpb:{ng_bpb:.8f} coverage:{ng_coverage:.8f}"
+                    )
             if distributed:
                 dist.barrier()
     # Legal score-first TTT eval

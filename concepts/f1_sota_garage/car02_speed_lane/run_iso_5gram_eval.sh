@@ -42,6 +42,7 @@ run_case() {
     BIGRAM_VOCAB_SIZE="${BIGRAM_VOCAB_SIZE:-1536}" \
     TTT_FREEZE_BLOCKS="${TTT_FREEZE_BLOCKS:-0}" \
     TTT_GRAD_CLIP="${TTT_GRAD_CLIP:-0.8}" \
+    TTT_EVAL_ENABLED="${TTT_EVAL_ENABLED:-0}" \
     ROPE_DIMS="${ROPE_DIMS:-24}" \
     COMPILE_ENABLED="${COMPILE_ENABLED:-1}" \
     COMPILE_FULLGRAPH="${COMPILE_FULLGRAPH:-0}" \
@@ -49,6 +50,7 @@ run_case() {
     NGRAM_EVAL_ALPHA="${NGRAM_EVAL_ALPHA:-0.20}" \
     NGRAM_EVAL_MIN_COUNT="${NGRAM_EVAL_MIN_COUNT:-2}" \
     NGRAM_EVAL_BUCKETS="${NGRAM_EVAL_BUCKETS:-4194304}" \
+    NGRAM_EVAL_MAX_SECONDS="${NGRAM_EVAL_MAX_SECONDS:-180}" \
     torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" \
         "${SCRIPT_DIR}/train_gpt.py" \
         2>&1 | tee "${log_path}"
@@ -57,11 +59,11 @@ run_case() {
     echo "--- ${case_id} summary (${log_path}) ---"
     if command -v rg >/dev/null 2>&1; then
         rg -n \
-          "model_params:|DIAGNOSTIC post_ema|final_int6_sliding_window_exact|final_int6_sliding_window_ngram|legal_ttt_exact|Total submission size int6\\+zstd|step:[0-9]+/20000 val_loss:" \
+          "model_params:|DIAGNOSTIC post_ema|final_int6_sliding_window_exact|final_int6_sliding_window_ngram|ngram_eval:cutoff|legal_ttt_exact|Total submission size int6\\+zstd|step:[0-9]+/20000 val_loss:" \
           "${log_path}" || true
     else
         grep -nE \
-          "model_params:|DIAGNOSTIC post_ema|final_int6_sliding_window_exact|final_int6_sliding_window_ngram|legal_ttt_exact|Total submission size int6\\+zstd|step:[0-9]+/20000 val_loss:" \
+          "model_params:|DIAGNOSTIC post_ema|final_int6_sliding_window_exact|final_int6_sliding_window_ngram|ngram_eval:cutoff|legal_ttt_exact|Total submission size int6\\+zstd|step:[0-9]+/20000 val_loss:" \
           "${log_path}" || true
     fi
     echo "-----------------------------------------"
