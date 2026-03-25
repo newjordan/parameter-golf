@@ -1118,7 +1118,15 @@ def eval_val_sliding_hashed_ngram(
     cubric_segments_seen = 0
 
     base_model.eval()
-    compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
+    # Use neural alpha head at eval time if enabled and available
+    use_alpha_head = (
+        args.alpha_head_eval
+        and getattr(base_model, 'alpha_head', None) is not None
+    )
+    if use_alpha_head:
+        compiled_fwd_alpha = maybe_torch_compile(base_model.forward_with_alpha, args)
+    else:
+        compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
     t0 = time.perf_counter()
     deadline = (t0 + max_seconds) if max_seconds > 0.0 else None
     cutoff_hit = False
@@ -1141,7 +1149,11 @@ def eval_val_sliding_hashed_ngram(
                 y_batch[i, :wlen] = chunk[1:]
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = compiled_logits(x_batch)
+                if use_alpha_head:
+                    logits, batch_alpha_pred = compiled_fwd_alpha(x_batch)
+                else:
+                    logits = compiled_logits(x_batch)
+                    batch_alpha_pred = None
             logits_f = logits.float()
             nll = F.cross_entropy(
                 logits_f.reshape(-1, logits_f.size(-1)),
@@ -1159,23 +1171,30 @@ def eval_val_sliding_hashed_ngram(
                 seg_nll = nll[i, s:wlen].to(torch.float64).cpu().numpy()
                 seg_model_p = np.exp(-seg_nll)
 
-                # Entropy-adaptive alpha (uses model output only, not target)
-                # Cubric accumulator shifts alpha bounds based on accumulated n-gram reliability
+                # Per-token alpha: neural alpha head or entropy-adaptive formula
                 eff_alpha_min = alpha_min
                 eff_alpha_max = alpha_max
-                if cubric_on and cubric_segments_seen > 0:
-                    # cubric_reliability in [-1, 1]: positive = n-gram helping, negative = hurting
-                    boost = np.clip(cubric_reliability, -1.0, 1.0) * cubric_boost_scale
-                    eff_alpha_min = np.clip(alpha_min + boost, 0.0, 0.95)
-                    eff_alpha_max = np.clip(alpha_max + boost, eff_alpha_min + 0.01, 0.95)
-                if adaptive:
-                    log_probs = F.log_softmax(logits_f[i, s:wlen], dim=-1)
-                    probs = log_probs.exp()
-                    entropy = -(probs * log_probs).sum(dim=-1).cpu().numpy()  # per-token entropy
-                    sig = 1.0 / (1.0 + np.exp(-ent_scale * (entropy - ent_center)))
-                    per_token_alpha = eff_alpha_min + (eff_alpha_max - eff_alpha_min) * sig
+                if batch_alpha_pred is not None:
+                    # Neural alpha head: use learned per-token alpha directly
+                    per_token_alpha = batch_alpha_pred[i, s:wlen].cpu().numpy().astype(np.float64)
                 else:
-                    per_token_alpha = np.full(seg_len, alpha)
+                    # Entropy-adaptive alpha (uses model output only, not target)
+                    # Cubric accumulator shifts alpha bounds based on accumulated n-gram reliability
+                    eff_alpha_min = alpha_min
+                    eff_alpha_max = alpha_max
+                    if cubric_on and cubric_segments_seen > 0:
+                        # cubric_reliability in [-1, 1]: positive = n-gram helping, negative = hurting
+                        boost = np.clip(cubric_reliability, -1.0, 1.0) * cubric_boost_scale
+                        eff_alpha_min = np.clip(alpha_min + boost, 0.0, 0.95)
+                        eff_alpha_max = np.clip(alpha_max + boost, eff_alpha_min + 0.01, 0.95)
+                    if adaptive:
+                        log_probs = F.log_softmax(logits_f[i, s:wlen], dim=-1)
+                        probs = log_probs.exp()
+                        entropy = -(probs * log_probs).sum(dim=-1).cpu().numpy()  # per-token entropy
+                        sig = 1.0 / (1.0 + np.exp(-ent_scale * (entropy - ent_center)))
+                        per_token_alpha = eff_alpha_min + (eff_alpha_max - eff_alpha_min) * sig
+                    else:
+                        per_token_alpha = np.full(seg_len, alpha)
 
                 global_j = np.arange(ws + s + 1, ws + wlen + 1, dtype=np.int64)
 
@@ -1846,11 +1865,14 @@ def main() -> None:
             args.f1_corr_rank * (args.model_dim + args.vocab_size)
             + 2 * (args.f1_corr_rank + args.vocab_size)
         )
+    alpha_head_params = sum(p.numel() for p in base_model.alpha_head.parameters()) if base_model.alpha_head is not None else 0
     log0(f"model_params:{n_params}")
     log0(
         f"f1_corr:rank={args.f1_corr_rank} params={f1_corr_params} "
         f"est_int6_bytes~{est_corr_int6_bytes}"
     )
+    if alpha_head_params > 0:
+        log0(f"alpha_head:enabled params={alpha_head_params} lr_factor={args.alpha_head_lr_factor} eval={int(args.alpha_head_eval)}")
     log0(f"mlp_act:{args.mlp_act} mlp_leaky_slope:{args.mlp_leaky_slope}")
     log0(f"XSA:last_{args.xsa_last_n} world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0(f"num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads} embed_lr:{token_lr} matrix_lr:{args.matrix_lr}")
@@ -2106,10 +2128,14 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_diag):.0f}ms"
     )
     full_state_dict = base_model.state_dict()
-    export_sd = {k: v for k, v in full_state_dict.items() if "mtp_heads" not in k}
+    export_exclude = {"mtp_heads", "alpha_head"}
+    export_sd = {k: v for k, v in full_state_dict.items() if not any(ex in k for ex in export_exclude)}
     excluded_mtp = sum(int(t.numel()) for k, t in full_state_dict.items() if "mtp_heads" in k)
+    excluded_alpha = sum(int(t.numel()) for k, t in full_state_dict.items() if "alpha_head" in k)
     if excluded_mtp > 0:
         log0(f"export_excluding_mtp_params:{excluded_mtp}")
+    if excluded_alpha > 0:
+        log0(f"export_excluding_alpha_head_params:{excluded_alpha}")
     if master_process:
         torch.save(export_sd, "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
