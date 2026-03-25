@@ -951,6 +951,8 @@ def eval_val_sliding(
 def eval_val_sliding_hashed_ngram(
     args: Hyperparameters,
     base_model: nn.Module,
+    rank: int,
+    world_size: int,
     device: torch.device,
     val_tokens: Tensor,
     base_bytes_lut: Tensor,
@@ -984,13 +986,17 @@ def eval_val_sliding_hashed_ngram(
 
     seq_len = eval_seq_len or args.train_seq_len
     total_tokens = val_tokens.numel() - 1
-    window_starts = [ws for ws in range(0, total_tokens, stride) if min(ws + seq_len, total_tokens) - ws >= 1]
+    all_window_starts = [ws for ws in range(0, total_tokens, stride) if min(ws + seq_len, total_tokens) - ws >= 1]
     total_scored_tokens = 0.0
-    for ws in window_starts:
+    for ws in all_window_starts:
         end = min(ws + seq_len, total_tokens)
         wlen = end - ws
         s = 0 if ws == 0 else max(wlen - stride, 0)
         total_scored_tokens += float(max(wlen - s, 0))
+    # Distribute windows across ranks
+    my_s = (len(all_window_starts) * rank) // world_size
+    my_e = (len(all_window_starts) * (rank + 1)) // world_size
+    window_starts = all_window_starts[my_s:my_e]
 
     val_np = val_tokens.numpy()
     ctx_table = np.zeros((buckets,), dtype=np.uint32)
@@ -1095,6 +1101,18 @@ def eval_val_sliding_hashed_ngram(
                     f"({prog*100:.1f}%) bpb={cur_bpb:.6f} t={elapsed:.0f}s",
                     flush=True,
                 )
+    # All-reduce across ranks
+    _loss = torch.tensor(loss_sum, device=device, dtype=torch.float64)
+    _toks = torch.tensor(token_count, device=device, dtype=torch.float64)
+    _bytes = torch.tensor(byte_count, device=device, dtype=torch.float64)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(_toks, op=dist.ReduceOp.SUM)
+        dist.all_reduce(_bytes, op=dist.ReduceOp.SUM)
+    loss_sum = _loss.item()
+    token_count = _toks.item()
+    byte_count = _bytes.item()
+
     coverage = token_count / max(total_scored_tokens, 1.0)
     if cutoff_hit:
         elapsed = time.perf_counter() - t0
@@ -2003,25 +2021,27 @@ def main() -> None:
         if args.ngram_eval_order >= 2:
             if distributed:
                 dist.barrier()
+            torch.cuda.synchronize()
+            t_ng = time.perf_counter()
+            ng_loss, ng_bpb, ng_coverage = eval_val_sliding_hashed_ngram(
+                args,
+                eval_model,
+                rank,
+                world_size,
+                device,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+                stride=args.eval_stride,
+                order=args.ngram_eval_order,
+                alpha=args.ngram_eval_alpha,
+                min_count=args.ngram_eval_min_count,
+                buckets=args.ngram_eval_buckets,
+                max_seconds=args.ngram_eval_max_seconds,
+                eval_seq_len=sw_seq_len,
+            )
             if rank == 0:
-                torch.cuda.synchronize()
-                t_ng = time.perf_counter()
-                ng_loss, ng_bpb, ng_coverage = eval_val_sliding_hashed_ngram(
-                    args,
-                    eval_model,
-                    device,
-                    val_tokens,
-                    base_bytes_lut,
-                    has_leading_space_lut,
-                    is_boundary_token_lut,
-                    stride=args.eval_stride,
-                    order=args.ngram_eval_order,
-                    alpha=args.ngram_eval_alpha,
-                    min_count=args.ngram_eval_min_count,
-                    buckets=args.ngram_eval_buckets,
-                    max_seconds=args.ngram_eval_max_seconds,
-                    eval_seq_len=sw_seq_len,
-                )
                 torch.cuda.synchronize()
                 ng_eval_ms = 1000.0 * (time.perf_counter() - t_ng)
                 if ng_coverage >= 0.999999:
