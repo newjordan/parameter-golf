@@ -1045,10 +1045,13 @@ def eval_val_sliding_hashed_ngram(
                     full_counts = full_table[full_key].astype(np.float64)
                     can_mix = ctx_counts >= float(min_count)
                     if can_mix.any():
-                        p_ng = full_counts / np.maximum(ctx_counts, 1.0)
+                        # Collision-safe estimate: ensure n-gram probability stays in [0, 1].
+                        # With hashed sketches, full_counts can exceed ctx_counts due collisions.
+                        p_ng = np.minimum(full_counts, ctx_counts) / np.maximum(ctx_counts, 1.0)
+                        p_ng = np.clip(p_ng, 0.0, 1.0)
                         mixed = (1.0 - alpha) * seg_model_p[v_idx] + alpha * p_ng
                         seg_model_p[v_idx[can_mix]] = mixed[can_mix]
-                    seg_nll = -np.log(np.clip(seg_model_p, 1e-12, None))
+                    seg_nll = -np.log(np.clip(seg_model_p, 1e-12, 1.0))
 
                     # Score-first legality: update cache only after segment scoring.
                     np.add.at(ctx_table, ctx_key, 1)
