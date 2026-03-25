@@ -123,9 +123,16 @@ class Hyperparameters:
     ttt_ema_decay = float(os.environ.get("TTT_EMA_DECAY", 0.995))  # EMA decay for TTT weight smoothing (0 = disabled)
     ttt_freeze_embed = bool(int(os.environ.get("TTT_FREEZE_EMBED", "1")))  # freeze tok_emb/bigram/ve during TTT
     # Optional legal score-first hashed n-gram interpolation at eval time.
-    # This path never uses label-aware gating: mix weight is fixed.
-    ngram_eval_order = int(os.environ.get("NGRAM_EVAL_ORDER", 0))  # 0=off, >=2 enables hashed n-gram
-    ngram_eval_alpha = float(os.environ.get("NGRAM_EVAL_ALPHA", 0.20))
+    # Multi-order backoff (2..max_order) with entropy-adaptive alpha.
+    # Alpha depends only on model entropy (no target/label access).
+    ngram_eval_order = int(os.environ.get("NGRAM_EVAL_ORDER", 0))  # 0=off, max order for backoff
+    ngram_eval_min_order = int(os.environ.get("NGRAM_EVAL_MIN_ORDER", 2))  # min order for backoff
+    ngram_eval_alpha = float(os.environ.get("NGRAM_EVAL_ALPHA", 0.30))  # base alpha (or fixed if adaptive off)
+    ngram_eval_adaptive = bool(int(os.environ.get("NGRAM_EVAL_ADAPTIVE", "1")))  # entropy-adaptive alpha
+    ngram_eval_alpha_min = float(os.environ.get("NGRAM_EVAL_ALPHA_MIN", 0.05))  # alpha floor (confident model)
+    ngram_eval_alpha_max = float(os.environ.get("NGRAM_EVAL_ALPHA_MAX", 0.60))  # alpha ceiling (uncertain model)
+    ngram_eval_entropy_center = float(os.environ.get("NGRAM_EVAL_ENTROPY_CENTER", 4.0))  # sigmoid center
+    ngram_eval_entropy_scale = float(os.environ.get("NGRAM_EVAL_ENTROPY_SCALE", 2.0))  # sigmoid steepness
     ngram_eval_min_count = int(os.environ.get("NGRAM_EVAL_MIN_COUNT", 2))
     ngram_eval_buckets = int(os.environ.get("NGRAM_EVAL_BUCKETS", 4_194_304))
     ngram_eval_max_seconds = float(os.environ.get("NGRAM_EVAL_MAX_SECONDS", 0.0))
@@ -980,22 +987,20 @@ def eval_val_sliding_hashed_ngram(
     batch_seqs: int = 32,
     eval_seq_len: int | None = None,
 ) -> tuple[float, float, float]:
-    """Score-first sliding eval with fixed-weight hashed n-gram interpolation.
+    """Score-first sliding eval with multi-order backoff n-gram + entropy-adaptive alpha.
 
     Legal behavior:
     - per-token score is computed before that token updates the cache
-    - no target-aware gating/min-NLL selection is used
+    - alpha depends only on model entropy (no target/label access)
+    - backoff tries longest context first, falls back to shorter
     """
-    if order < 2:
-        raise ValueError(f"NGRAM_EVAL_ORDER must be >=2, got {order}")
-    if not (0.0 <= alpha <= 1.0):
-        raise ValueError(f"NGRAM_EVAL_ALPHA must be in [0, 1], got {alpha}")
-    if min_count < 1:
-        raise ValueError(f"NGRAM_EVAL_MIN_COUNT must be >=1, got {min_count}")
-    if buckets < 1024:
-        raise ValueError(f"NGRAM_EVAL_BUCKETS must be >=1024, got {buckets}")
-    if max_seconds < 0.0:
-        raise ValueError(f"NGRAM_EVAL_MAX_SECONDS must be >=0, got {max_seconds}")
+    min_order = max(args.ngram_eval_min_order, 2)
+    max_order = max(order, min_order)
+    adaptive = args.ngram_eval_adaptive
+    alpha_min = args.ngram_eval_alpha_min
+    alpha_max = args.ngram_eval_alpha_max
+    ent_center = args.ngram_eval_entropy_center
+    ent_scale = args.ngram_eval_entropy_scale
 
     seq_len = eval_seq_len or args.train_seq_len
     total_tokens = val_tokens.numel() - 1
@@ -1012,11 +1017,13 @@ def eval_val_sliding_hashed_ngram(
     window_starts = all_window_starts[my_s:my_e]
 
     val_np = val_tokens.numpy()
-    ctx_table = np.zeros((buckets,), dtype=np.uint32)
-    full_table = np.zeros((buckets,), dtype=np.uint32)
+    # Per-order hash tables for backoff
+    ctx_tables = {n: np.zeros((buckets,), dtype=np.uint32) for n in range(min_order, max_order + 1)}
+    full_tables = {n: np.zeros((buckets,), dtype=np.uint32) for n in range(min_order, max_order + 1)}
     mask = np.uint64(buckets - 1)
     primes = np.array(
-        [np.uint64(36313), np.uint64(27191), np.uint64(51647), np.uint64(81929), np.uint64(131071)],
+        [np.uint64(36313), np.uint64(27191), np.uint64(51647), np.uint64(81929),
+         np.uint64(131071), np.uint64(174763), np.uint64(233017)],
         dtype=np.uint64,
     )
 
@@ -1049,8 +1056,9 @@ def eval_val_sliding_hashed_ngram(
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = compiled_logits(x_batch)
+            logits_f = logits.float()
             nll = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
+                logits_f.reshape(-1, logits_f.size(-1)),
                 y_batch.reshape(-1),
                 reduction="none",
             ).reshape(bsz, seq_len)
@@ -1065,37 +1073,72 @@ def eval_val_sliding_hashed_ngram(
                 seg_nll = nll[i, s:wlen].to(torch.float64).cpu().numpy()
                 seg_model_p = np.exp(-seg_nll)
 
+                # Entropy-adaptive alpha (uses model output only, not target)
+                if adaptive:
+                    log_probs = F.log_softmax(logits_f[i, s:wlen], dim=-1)
+                    probs = log_probs.exp()
+                    entropy = -(probs * log_probs).sum(dim=-1).cpu().numpy()  # per-token entropy
+                    sig = 1.0 / (1.0 + np.exp(-ent_scale * (entropy - ent_center)))
+                    per_token_alpha = alpha_min + (alpha_max - alpha_min) * sig
+                else:
+                    per_token_alpha = np.full(seg_len, alpha)
+
                 global_j = np.arange(ws + s + 1, ws + wlen + 1, dtype=np.int64)
-                valid = global_j >= (order - 1)
-                if valid.any():
+
+                # Multi-order backoff: try highest order first, fall back
+                p_ng = np.zeros(seg_len, dtype=np.float64)
+                ng_matched = np.zeros(seg_len, dtype=np.bool_)
+                tgt_np = val_np[global_j].astype(np.uint64)
+
+                for n in range(max_order, min_order - 1, -1):
+                    ctx_width = n - 1
+                    valid = (global_j >= ctx_width) & (~ng_matched)
+                    if not valid.any():
+                        continue
                     v_idx = np.nonzero(valid)[0]
                     jv = global_j[v_idx]
 
-                    ctx_hash = np.zeros((len(jv),), dtype=np.uint64)
-                    ctx_width = order - 1
+                    ctx_hash = np.zeros(len(jv), dtype=np.uint64)
                     for k in range(ctx_width):
                         tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
                         ctx_hash ^= tok * primes[k % len(primes)]
                     ctx_key = (ctx_hash & mask).astype(np.int64)
+                    full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
 
-                    tgt_np = val_np[jv].astype(np.uint64)
-                    full_key = ((ctx_hash ^ (tgt_np * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
+                    ctx_counts = ctx_tables[n][ctx_key].astype(np.float64)
+                    full_counts = full_tables[n][full_key].astype(np.float64)
+                    has_data = ctx_counts >= float(min_count)
+                    if has_data.any():
+                        p = np.minimum(full_counts, ctx_counts) / np.maximum(ctx_counts, 1.0)
+                        p = np.clip(p, 0.0, 1.0)
+                        hit_idx = v_idx[has_data]
+                        p_ng[hit_idx] = p[has_data]
+                        ng_matched[hit_idx] = True
 
-                    ctx_counts = ctx_table[ctx_key].astype(np.float64)
-                    full_counts = full_table[full_key].astype(np.float64)
-                    can_mix = ctx_counts >= float(min_count)
-                    if can_mix.any():
-                        # Collision-safe estimate: ensure n-gram probability stays in [0, 1].
-                        # With hashed sketches, full_counts can exceed ctx_counts due collisions.
-                        p_ng = np.minimum(full_counts, ctx_counts) / np.maximum(ctx_counts, 1.0)
-                        p_ng = np.clip(p_ng, 0.0, 1.0)
-                        mixed = (1.0 - alpha) * seg_model_p[v_idx] + alpha * p_ng
-                        seg_model_p[v_idx[can_mix]] = mixed[can_mix]
-                    seg_nll = -np.log(np.clip(seg_model_p, 1e-12, 1.0))
+                # Mix where n-gram matched
+                if ng_matched.any():
+                    m_idx = np.nonzero(ng_matched)[0]
+                    a = per_token_alpha[m_idx]
+                    seg_model_p[m_idx] = (1.0 - a) * seg_model_p[m_idx] + a * p_ng[m_idx]
 
-                    # Score-first legality: update cache only after segment scoring.
-                    np.add.at(ctx_table, ctx_key, 1)
-                    np.add.at(full_table, full_key, 1)
+                seg_nll = -np.log(np.clip(seg_model_p, 1e-12, 1.0))
+
+                # Score-first legality: update ALL order caches after segment scoring
+                for n in range(min_order, max_order + 1):
+                    ctx_width = n - 1
+                    valid = global_j >= ctx_width
+                    if not valid.any():
+                        continue
+                    v_idx = np.nonzero(valid)[0]
+                    jv = global_j[v_idx]
+                    ctx_hash = np.zeros(len(jv), dtype=np.uint64)
+                    for k in range(ctx_width):
+                        tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
+                        ctx_hash ^= tok * primes[k % len(primes)]
+                    ctx_key = (ctx_hash & mask).astype(np.int64)
+                    full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
+                    np.add.at(ctx_tables[n], ctx_key, 1)
+                    np.add.at(full_tables[n], full_key, 1)
 
                 loss_sum += float(seg_nll.sum())
                 token_count += float(seg_len)
