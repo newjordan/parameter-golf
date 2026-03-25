@@ -1165,9 +1165,9 @@ def eval_val_sliding_hashed_ngram(
                         avg_rate = sum(r for _, r in active) / len(active)
                         for n, rate in active:
                             if rate > avg_rate + 0.05:
-                                _c_alpha_mult[n] = min(_c_alpha_mult[n] * 1.03, 2.0)
+                                _c_alpha_mult[n] = min(_c_alpha_mult[n] * 1.05, 4.0)
                             elif rate < avg_rate - 0.05:
-                                _c_alpha_mult[n] = max(_c_alpha_mult[n] * 0.97, 0.3)
+                                _c_alpha_mult[n] = max(_c_alpha_mult[n] * 0.95, 0.05)
                         if rank == 0 and _cfired % 8 == 0:
                             mults = " ".join(f"o{n}:{_c_alpha_mult[n]:.3f}"
                                              for n in range(min_order, max_order + 1))
