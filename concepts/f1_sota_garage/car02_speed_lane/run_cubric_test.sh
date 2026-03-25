@@ -32,4 +32,4 @@ env \
   CUBRIC_PRUNE_NOISY=1 \
   CUBRIC_REWEIGHT_ORDERS=1 \
   torchrun --standalone --nproc_per_node="${NPROC}" \
-    "${SCRIPT_DIR}/train_gpt_cubric.py"
+    "${SCRIPT_DIR}/train_gpt.py"
