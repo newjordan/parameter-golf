@@ -124,6 +124,7 @@ class Hyperparameters:
     ngram_eval_min_count = int(os.environ.get("NGRAM_EVAL_MIN_COUNT", 2))
     ngram_eval_buckets = int(os.environ.get("NGRAM_EVAL_BUCKETS", 4_194_304))
     ngram_eval_max_seconds = float(os.environ.get("NGRAM_EVAL_MAX_SECONDS", 0.0))
+    cubric_cadence = int(os.environ.get("CUBRIC_CADENCE", 0))
     compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
     compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
 def maybe_torch_compile(obj, args: Hyperparameters):
