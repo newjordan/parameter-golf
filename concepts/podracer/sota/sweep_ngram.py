@@ -213,7 +213,8 @@ def main():
         args.ngram_eval_min_count = combo["min_count"]
         args.ngram_eval_buckets = combo["buckets"]
         args.ngram_eval_max_seconds = sweep_max_seconds
-        args.cubric_cadence = 0  # no cubric during sweep
+        if hasattr(args, 'cubric_cadence'):
+            args.cubric_cadence = 0
 
         if distributed:
             dist.barrier()
