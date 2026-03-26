@@ -1321,7 +1321,9 @@ class CrawlerGPT(nn.Module):
             raw = torch.randn(crawler_loops, model_dim)
             Q, _ = torch.linalg.qr(raw.T)
             ortho = Q.T[:crawler_loops]
-            self.loop_pos = nn.Parameter(ortho * 0.01)
+            self.loop_pos = nn.ParameterList([
+                nn.Parameter(ortho[i] * 0.01) for i in range(crawler_loops)
+            ])
         else:
             self.loop_pos = None
         # VE on crawler blocks
