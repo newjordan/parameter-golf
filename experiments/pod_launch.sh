@@ -7,7 +7,7 @@ set -euo pipefail
 # Handles: git clone/checkout, env setup, then runs your experiment.
 
 REPO_URL="https://github.com/newjordan/parameter-golf-1.git"
-BRANCH="${BRANCH:-submission/xwing-cubric3d}"
+BRANCH="${BRANCH:-test}"
 WORKSPACE="/workspace/parameter-golf-lab"
 REMOTE_NAME="fork1"
 EXPERIMENT="${1:-}"
