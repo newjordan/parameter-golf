@@ -1,9 +1,10 @@
 #!/bin/bash
 set -euo pipefail
-# A-WING PURPLE: Oracle Alpha + 9-Prime Hash Fix
-# Instead of entropy-adaptive alpha, directly compare model_p vs ngram_p
-# per token. Soft sigmoid on log-ratio (steepness=8), clip 0.95.
-# Base: SOTA bwing_full_port (0.4512 BPB)
+# A-WING PURPLE: Learned Mixer Head — Legal N-gram Ceiling Finder
+# Trains a Linear(512→12) head to predict per-token expert weights
+# (neural + 11 n-gram orders 2-12). Training oracle prefilled from
+# training data. Eval uses backward-looking val-data cache.
+# Base: Green_1 SOTA 0.3200 BPB (neural 1.1195)
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
@@ -29,11 +30,11 @@ except ImportError:
 " 2>/dev/null || echo "  WARNING: no flash_attn found"
 
 echo "============================================"
-echo "  A-WING PURPLE — Oracle Alpha + 9-Prime"
+echo "  A-WING PURPLE — Learned Mixer Head"
 echo "  Seed: ${SEED}"
-echo "  Oracle: alpha = sigmoid(8 * log(ngram_p/model_p)) * 0.95"
-echo "  9 hash primes, INT6, no cubric"
-echo "  Training cap: 570s (30s reserved for GPTQ)"
+echo "  Mixer: Linear(512→12), 11 n-gram orders 2-12"
+echo "  12 hash primes, INT6, no cubric"
+echo "  Training cap: 540s (60s reserved for GPTQ + eval)"
 echo "============================================"
 
 SEED="$SEED" \
@@ -49,7 +50,13 @@ VAL_LOSS_EVERY=20000 \
 TRAIN_LOG_EVERY=1000 \
 SWA_EVERY=100 \
 COMPLEMENT_ALPHA=0.5 \
-NGRAM_EVAL_ORDER=9 \
+MIXER_ENABLED=1 \
+MIXER_N_ORDERS=11 \
+MIXER_LOSS_WEIGHT=0.1 \
+MIXER_NEURAL_FLOOR=0.05 \
+MIXER_BUCKETS=8388608 \
+MIXER_PREFILL_MAX_SHARDS=80 \
+NGRAM_EVAL_ORDER=12 \
 NGRAM_EVAL_MIN_ORDER=2 \
 NGRAM_EVAL_ADAPTIVE=1 \
 NGRAM_EVAL_ALPHA=0.30 \
@@ -62,8 +69,8 @@ NGRAM_EVAL_BUCKETS=8388608 \
 NGRAM_EVAL_MAX_SECONDS=0 \
 CUBRIC_CADENCE=0 \
 NGRAM_ENTROPY_SHIFT=1 \
-NGRAM_ORDER_MULTS="0.3,0.3,0.97,2.0,2.0,2.0,2.0,2.0" \
-MAX_WALLCLOCK_SECONDS=570 \
+NGRAM_ORDER_MULTS="" \
+MAX_WALLCLOCK_SECONDS=540 \
 COMPILE_FULLGRAPH=0 \
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" \
     "${SCRIPT_DIR}/train_gpt.py" \
