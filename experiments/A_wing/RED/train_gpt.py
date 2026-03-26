@@ -2228,8 +2228,13 @@ def main() -> None:
                 if distributed:
                     model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                _mx_p, _mx_v = None, None
+                if train_mixer is not None:
+                    _mx_p_raw, _mx_v_raw = train_mixer.get_ngram_probs(x, y)
+                    _mx_p = _mx_p_raw.to(device=device, dtype=torch.bfloat16, non_blocking=True)
+                    _mx_v = _mx_v_raw.to(device=device, non_blocking=True)
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                    warmup_loss = model(x, y)
+                    warmup_loss = model(x, y, ngram_expert_p=_mx_p, ngram_valid_mask=_mx_v)
                 (warmup_loss * grad_scale).backward()
             for opt in optimizers:
                 opt.step()
