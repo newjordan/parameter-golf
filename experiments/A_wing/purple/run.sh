@@ -34,7 +34,7 @@ echo "  A-WING PURPLE — Learned Mixer Head"
 echo "  Seed: ${SEED}"
 echo "  Mixer: Linear(512→12), 11 n-gram orders 2-12"
 echo "  12 hash primes, INT6, no cubric"
-echo "  Training cap: 540s (60s reserved for GPTQ + eval)"
+echo "  Training cap: 570s (30s reserved for GPTQ)"
 echo "============================================"
 
 SEED="$SEED" \
@@ -55,7 +55,7 @@ MIXER_N_ORDERS=11 \
 MIXER_LOSS_WEIGHT=0.1 \
 MIXER_NEURAL_FLOOR=0.05 \
 MIXER_BUCKETS=8388608 \
-MIXER_PREFILL_MAX_SHARDS=80 \
+MIXER_PREFILL_MAX_SHARDS=20 \
 NGRAM_EVAL_ORDER=12 \
 NGRAM_EVAL_MIN_ORDER=2 \
 NGRAM_EVAL_ADAPTIVE=1 \
@@ -70,7 +70,7 @@ NGRAM_EVAL_MAX_SECONDS=0 \
 CUBRIC_CADENCE=0 \
 NGRAM_ENTROPY_SHIFT=1 \
 NGRAM_ORDER_MULTS="" \
-MAX_WALLCLOCK_SECONDS=540 \
+MAX_WALLCLOCK_SECONDS=570 \
 COMPILE_FULLGRAPH=0 \
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" \
     "${SCRIPT_DIR}/train_gpt.py" \
