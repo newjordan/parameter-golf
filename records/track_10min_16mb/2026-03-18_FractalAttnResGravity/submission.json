@@ -1,0 +1,31 @@
+{
+  "author": "Frosty40",
+  "github_id": "newjordan",
+  "submission_name": "FractalAttnResGravity",
+  "val_bpb": null,
+  "track": "10min_16mb",
+  "status": "pending_cloud_validation",
+  "date": "2026-03-18",
+  "description": "3 shared transformer layers × 3 loops (864d) with learned gravity auxiliary losses and AttnRes depth attention. Replaces U-Net skips + resid_mix.",
+  "architecture": {
+    "num_unique_layers": 3,
+    "num_loops": 3,
+    "model_dim": 864,
+    "num_heads": 8,
+    "num_kv_heads": 4,
+    "mlp_mult": 2,
+    "vocab_size": 1024,
+    "seq_len": 1024,
+    "tie_embeddings": true,
+    "gravity": true,
+    "attnres": true,
+    "effective_depth": 9
+  },
+  "local_results": {
+    "note": "DGX Spark GB10, 300 steps, 1 shard, AdamW, no torch.compile",
+    "baseline_bpb": 2.7927,
+    "fractal_only_bpb": 2.5953,
+    "fractal_gravity_bpb": 2.6149,
+    "fractal_gravity_attnres_bpb": 2.6084
+  }
+}
