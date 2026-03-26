@@ -5,7 +5,7 @@ set -euo pipefail
 # Racing profile: alpha_max=0.70, center=3.0, buckets=8M + cubric
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
 
