@@ -899,7 +899,7 @@ def eval_val_sliding(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
     stride: int,
-    batch_seqs: int = 32,
+    batch_seqs: int = 128,
     eval_seq_len: int | None = None,
 ) -> tuple[float, float]:
     """Sliding window evaluation: each token scored with maximum context."""
@@ -973,8 +973,8 @@ def _ngram_bulk_update(val_np, start, end, ctx_tables, full_tables,
         ctx_key = (ctx_hash & mask).astype(np.int64)
         tgt = t[order - 1:]
         full_key = ((ctx_hash ^ (tgt * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
-        np.add.at(ctx_tables[order], ctx_key, 1)
-        np.add.at(full_tables[order], full_key, 1)
+        ctx_tables[order] += np.bincount(ctx_key, minlength=len(ctx_tables[order])).astype(np.uint32)
+        full_tables[order] += np.bincount(full_key, minlength=len(full_tables[order])).astype(np.uint32)
 
 def eval_val_sliding_hashed_ngram(
     args: Hyperparameters,
@@ -992,7 +992,7 @@ def eval_val_sliding_hashed_ngram(
     min_count: int,
     buckets: int,
     max_seconds: float = 0.0,
-    batch_seqs: int = 32,
+    batch_seqs: int = 128,
     eval_seq_len: int | None = None,
 ) -> tuple[float, float, float]:
     """Score-first sliding eval with chunk-based SHARED n-gram tables + cubric.
