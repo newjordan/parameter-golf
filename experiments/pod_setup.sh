@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/newjordan/parameter-golf.git"
 BRANCH="test"
-WORKSPACE="/workspace/parameter-golf-lab"
+WORKSPACE="/workspace/parameter-golf"
 
 echo "============================================"
 echo "  POD SETUP"
