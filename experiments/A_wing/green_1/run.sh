@@ -13,11 +13,27 @@ export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
 SEED="${SEED:-1337}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 
+# --- Pre-flight checks ---
+echo "[preflight] checking zstandard..."
+python3 -c "import zstandard; print(f'  zstandard {zstandard.__version__} OK')" 2>/dev/null \
+    || { echo "  FATAL: zstandard not found. pip install zstandard"; exit 1; }
+
+echo "[preflight] checking flash_attn..."
+python3 -c "
+try:
+    import flash_attn_interface; print('  FA3 (hopper) OK')
+except ImportError:
+    import flash_attn; v=flash_attn.__version__
+    if v.startswith('3'): print(f'  FA3 v{v} OK')
+    else: print(f'  WARNING: FA{v[0]} detected — want FA3')
+" 2>/dev/null || echo "  WARNING: no flash_attn found"
+
 echo "============================================"
 echo "  A-WING GREEN_1 — Oracle Alpha + 9-Prime"
 echo "  Seed: ${SEED}"
 echo "  Oracle: alpha = sigmoid(8 * log(ngram_p/model_p)) * 0.95"
 echo "  9 hash primes, INT6, no cubric"
+echo "  Training cap: 570s (30s reserved for GPTQ)"
 echo "============================================"
 
 SEED="$SEED" \

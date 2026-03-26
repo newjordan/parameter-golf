@@ -15,6 +15,8 @@ try:
     import zstandard
     _COMPRESSOR = "zstd"
 except ImportError:
+    import warnings
+    warnings.warn("zstandard not found — falling back to zlib. Artifact will be ~1.5MB larger! pip install zstandard")
     _COMPRESSOR = "zlib"
 import numpy as np
 import sentencepiece as spm
