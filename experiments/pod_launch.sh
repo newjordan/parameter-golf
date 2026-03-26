@@ -7,8 +7,9 @@ set -euo pipefail
 # Handles: git clone/checkout, env setup, then runs your experiment.
 
 REPO_URL="https://github.com/newjordan/parameter-golf-1.git"
-BRANCH="submission/xwing-cubric3d"
+BRANCH="${BRANCH:-submission/xwing-cubric3d}"
 WORKSPACE="/workspace/parameter-golf-lab"
+REMOTE_NAME="fork1"
 EXPERIMENT="${1:-}"
 
 echo "============================================"
@@ -21,8 +22,10 @@ echo "============================================"
 if [ -d "${WORKSPACE}/.git" ]; then
     echo "[1/3] Repo exists, force-syncing to ${BRANCH}..."
     cd "${WORKSPACE}"
-    git fetch origin "${BRANCH}" --quiet
-    git checkout -B "${BRANCH}" "origin/${BRANCH}" --force
+    # Ensure private remote exists
+    git remote get-url "${REMOTE_NAME}" &>/dev/null || git remote add "${REMOTE_NAME}" "${REPO_URL}"
+    git fetch "${REMOTE_NAME}" "${BRANCH}" --quiet
+    git checkout -B "${BRANCH}" "${REMOTE_NAME}/${BRANCH}" --force
     git clean -fd --quiet
 else
     echo "[1/3] Cloning repo..."
