@@ -1051,14 +1051,18 @@ def eval_val_sliding_hashed_ngram(
     byte_count = 0.0
 
     # Per-order entropy centers: higher orders trusted at lower entropy (PR #798 insight)
-    _per_order_ent = {
-        7: ent_center,         # 3.0 — trust 7-grams even when model is fairly confident
-        6: ent_center + 0.2,   # 3.2
-        5: ent_center + 0.5,   # 3.5
-        4: ent_center + 0.8,   # 3.8
-        3: ent_center + 1.2,   # 4.2
-        2: ent_center + 1.5,   # 4.5 — only trust bigrams when model is very uncertain
-    }
+    _use_per_order = bool(int(os.environ.get("PER_ORDER_ENT", "1")))
+    if _use_per_order:
+        _per_order_ent = {
+            7: ent_center,         # 3.0 — trust 7-grams even when model is fairly confident
+            6: ent_center + 0.2,   # 3.2
+            5: ent_center + 0.5,   # 3.5
+            4: ent_center + 0.8,   # 3.8
+            3: ent_center + 1.2,   # 4.2
+            2: ent_center + 1.5,   # 4.5 — only trust bigrams when model is very uncertain
+        }
+    else:
+        _per_order_ent = {n: ent_center for n in range(2, 8)}
 
     # Cubric lite: per-order adaptive alpha scaling
     _cc = getattr(args, 'cubric_cadence', 0); _con = _cc > 0; _cfired = 0
