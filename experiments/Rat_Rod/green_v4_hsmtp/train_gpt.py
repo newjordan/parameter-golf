@@ -3,9 +3,11 @@ import copy
 import glob
 import math
 import os
+import queue
 import random
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -63,7 +65,7 @@ class Hyperparameters:
     mtp_loss_weight = float(os.environ.get("MTP_LOSS_WEIGHT", 0.2))
     hsmtp_num_heads = int(os.environ.get("HSMTP_NUM_HEADS", 0))
     hsmtp_loss_weight = float(os.environ.get("HSMTP_LOSS_WEIGHT", 0.3))
-    hsmtp_entropy_weight = bool(int(os.environ.get("HSMTP_ENTROPY_WEIGHT", "1")))
+    # hsmtp_entropy_weight removed — CPU n-gram bridge provides weights now
     muon_beta2 = float(os.environ.get("MUON_BETA2", 0.95))
     swa_enabled = bool(int(os.environ.get("SWA_ENABLED", "1")))
     swa_every = int(os.environ.get("SWA_EVERY", 50))
@@ -123,6 +125,84 @@ class TrainNgramTracker:
         count = self.bi_counts.reshape(-1)[xf * self.V + yf]
         ngram_prob = count / (total + 1)
         return (1.0 - self.alpha * ngram_prob).clamp(min=0.1)
+
+# --- CPU N-gram Bridge for HS-MTP ---
+
+_BRIDGE_PRIMES = [36313, 27191, 51497, 73331]  # XOR hash primes per order depth
+
+class CPUNgramBridge:
+    """Async CPU bridge: builds n-gram count tables from training data,
+    provides per-token confidence weights for HS-MTP loss weighting.
+    Tokens where n-grams are confident get LOW weight (model doesn't need to try),
+    tokens where n-grams are weak get HIGH weight (model must focus here)."""
+
+    def __init__(self, buckets: int = 1 << 20, max_order: int = 4):
+        self.buckets = buckets
+        self.max_order = max_order
+        self.tables = [torch.zeros(buckets, dtype=torch.float32) for _ in range(max_order)]
+        self._queue: queue.Queue = queue.Queue(maxsize=4)
+        self._lock = threading.Lock()
+        self._total_tokens = 0
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def submit(self, token_ids_cpu: Tensor) -> None:
+        """Non-blocking: submit token batch for n-gram counting on CPU."""
+        try:
+            self._queue.put_nowait(token_ids_cpu.to(torch.int32).detach())
+        except queue.Full:
+            pass  # Never block the GPU — skip if CPU is behind
+
+    def _worker(self) -> None:
+        while True:
+            tokens = self._queue.get()
+            if tokens is None:
+                break
+            self._update(tokens)
+
+    def _update(self, tokens: Tensor) -> None:
+        t = tokens.reshape(-1)
+        n = t.numel()
+        with self._lock:
+            self._total_tokens += n
+            for order in range(1, min(self.max_order, n) + 1):
+                # Multi-prime XOR hash, same family as BigramHash
+                h = torch.zeros(n - order, dtype=torch.int32)
+                for k in range(order + 1):
+                    prime = _BRIDGE_PRIMES[k % len(_BRIDGE_PRIMES)]
+                    h = h ^ (prime * t[k : n - order + k])
+                h = (h % self.buckets).long()
+                ones = torch.ones(h.numel(), dtype=torch.float32)
+                self.tables[order - 1].scatter_add_(0, h, ones)
+
+    def get_weights(self, token_ids_cpu: Tensor, device: torch.device) -> Tensor:
+        """Return per-token weight tensor: high where n-grams are weak, low where strong.
+        Shape: (batch, seq). Transferred to target device. Fully batched — no Python loops over batch."""
+        t = token_ids_cpu.to(torch.int32)  # (batch, seq)
+        batch, seq = t.shape
+        confidence = torch.zeros(batch, seq, dtype=torch.float32)
+        with self._lock:
+            for order in range(self.max_order, 0, -1):
+                if seq <= order:
+                    continue
+                # Batched hash: operate on (batch, valid) tensors directly
+                h = torch.zeros(batch, seq - order, dtype=torch.int32)
+                for k in range(order + 1):
+                    prime = _BRIDGE_PRIMES[k % len(_BRIDGE_PRIMES)]
+                    h = h ^ (prime * t[:, k : seq - order + k])
+                h = (h % self.buckets).long()
+                # Lookup counts for all (batch, valid) positions at once
+                counts = self.tables[order - 1][h.reshape(-1)].view(batch, seq - order)
+                max_count = counts.max() + 1.0
+                conf = (counts / max_count).clamp(0, 1)
+                confidence[:, order:] = torch.max(confidence[:, order:], conf)
+        # Invert: high confidence -> low weight, low confidence -> high weight
+        weights = (1.0 - 0.7 * confidence).clamp(0.3, 3.0)
+        return weights.to(device)
+
+    def stop(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=2.0)
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -721,7 +801,6 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         hsmtp_num_heads: int = 0,
         hsmtp_loss_weight: float = 0.3,
-        hsmtp_entropy_weight: bool = True,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
         xsa_last_n: int = 0,
@@ -746,7 +825,6 @@ class GPT(nn.Module):
         self.mtp_loss_weight = mtp_loss_weight
         self.hsmtp_num_heads = hsmtp_num_heads
         self.hsmtp_loss_weight = hsmtp_loss_weight
-        self.hsmtp_entropy_weight = hsmtp_entropy_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim, trigram=bool(int(os.environ.get("TRIGRAM", "0")))) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
@@ -814,6 +892,8 @@ class GPT(nn.Module):
         for head in self.hsmtp_heads:
             head._zero_init = True
         self._hsmtp_vocab = _hsmtp_out
+        # Non-persistent buffer for CPU bridge weights (set externally each step)
+        self.register_buffer('_hsmtp_w', None, persistent=False)
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
@@ -911,38 +991,27 @@ class GPT(nn.Module):
                 mtp_loss_count += 1
             if mtp_loss_count > 0:
                 main_loss = main_loss + self.mtp_loss_weight * (mtp_loss_sum / mtp_loss_count)
-        # HS-MTP: hash-space multi-token prediction
+        # HS-MTP: hash-space multi-token prediction with CPU n-gram bridge weighting
         if self.training and self.hsmtp_num_heads > 0 and self.hsmtp_loss_weight > 0.0:
             _, seqlen, dim = x.shape
             mod = self._hsmtp_vocab - 1
-            # Compute per-token entropy weight from main logits (no grad — just a weighting signal)
-            if self.hsmtp_entropy_weight:
-                with torch.no_grad():
-                    log_p = logits.float().log_softmax(-1)
-                    token_entropy = -(log_p.exp() * log_p).sum(-1)  # (batch*seq,)
-                    ew = (token_entropy / (token_entropy.mean() + 1e-6)).clamp(0.3, 3.0)
-                    ew = ew.view(x.shape[0], seqlen)  # (batch, seq)
+            ew = self._hsmtp_w  # (batch, seq) — set by CPU bridge before each call
             hsmtp_loss_sum = x.new_zeros(())
             hsmtp_count = 0
             t_ids = input_ids.to(torch.int32)
             for k, hsmtp_head in enumerate(self.hsmtp_heads):
-                # Hash target: (k+1)-gram hash of tokens at position t and t+k+1
                 shift = k + 1
                 valid_t = seqlen - shift
                 if valid_t <= 0:
                     continue
-                # Target: hash(token[t], token[t+shift]) — what n-gram pattern appears at position t+shift
                 hash_targets = (torch.bitwise_xor(
                     36313 * t_ids[:, shift:], 27191 * t_ids[:, :-shift]
                 ) % mod).long()
                 hid = x[:, :valid_t, :].reshape(-1, dim)
-                h_logits = hsmtp_head(hid)  # (batch*valid_t, hsmtp_vocab)
-                if self.hsmtp_entropy_weight:
-                    per_tok = F.cross_entropy(h_logits.float(), hash_targets.reshape(-1), reduction="none")
-                    w = ew[:, :valid_t].reshape(-1)
-                    hsmtp_loss_sum = hsmtp_loss_sum + (per_tok * w).mean()
-                else:
-                    hsmtp_loss_sum = hsmtp_loss_sum + F.cross_entropy(h_logits.float(), hash_targets.reshape(-1), reduction="mean")
+                h_logits = hsmtp_head(hid)
+                per_tok = F.cross_entropy(h_logits.float(), hash_targets.reshape(-1), reduction="none")
+                w = ew[:, :valid_t].reshape(-1)
+                hsmtp_loss_sum = hsmtp_loss_sum + (per_tok * w).mean()
                 hsmtp_count += 1
             if hsmtp_count > 0:
                 main_loss = main_loss + self.hsmtp_loss_weight * (hsmtp_loss_sum / hsmtp_count)
@@ -1493,7 +1562,6 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         hsmtp_num_heads=args.hsmtp_num_heads,
         hsmtp_loss_weight=args.hsmtp_loss_weight,
-        hsmtp_entropy_weight=args.hsmtp_entropy_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
         xsa_last_n=args.xsa_last_n,
@@ -1521,6 +1589,11 @@ def main() -> None:
         log0(f"complementary_training:alpha={args.complement_alpha}")
     else:
         base_model._ngram_tracker = None
+    # CPU N-gram Bridge for HS-MTP weighting
+    ngram_bridge = None
+    if args.hsmtp_num_heads > 0:
+        ngram_bridge = CPUNgramBridge(buckets=1 << 20, max_order=args.hsmtp_num_heads)
+        log0(f"cpu_ngram_bridge:enabled buckets={1<<20} max_order={args.hsmtp_num_heads}")
     # No DDP -- Parallel Muon handles bank grad communication via reduce-scatter,
     # and non-bank grads are manually all-reduced before Adam steps.
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
@@ -1610,7 +1683,7 @@ def main() -> None:
     log0(f"model_params:{n_params}")
     log0(f"mtp_num_heads:{args.mtp_num_heads} mtp_loss_weight:{args.mtp_loss_weight} mtp_params:{mtp_params}")
     hsmtp_params = sum(p.numel() for p in base_model.hsmtp_heads.parameters())
-    log0(f"hsmtp_num_heads:{args.hsmtp_num_heads} hsmtp_loss_weight:{args.hsmtp_loss_weight} hsmtp_entropy_weight:{args.hsmtp_entropy_weight} hsmtp_params:{hsmtp_params}")
+    log0(f"hsmtp_num_heads:{args.hsmtp_num_heads} hsmtp_loss_weight:{args.hsmtp_loss_weight} hsmtp_params:{hsmtp_params}")
     xsa_layers = [i for i, b in enumerate(base_model.blocks) if b.attn.use_xsa]
     log0(f"XSA:last_{args.xsa_last_n} active_layers:{xsa_layers}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
@@ -1719,6 +1792,11 @@ def main() -> None:
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+            # CPU bridge: compute weights from n-gram tables, feed tokens async
+            if ngram_bridge is not None:
+                x_cpu = x.cpu()  # single transfer
+                base_model._hsmtp_w = ngram_bridge.get_weights(x_cpu, device)
+                ngram_bridge.submit(x_cpu)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
@@ -1787,6 +1865,9 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+    if ngram_bridge is not None:
+        ngram_bridge.stop()
+        log0(f"cpu_ngram_bridge:stopped total_tokens={ngram_bridge._total_tokens}")
     # Apply weight averaging
     if args.lawa_enabled and len(lawa_queue) > 1:
         log0(f"lawa:applying LAWA averaging k={len(lawa_queue)}")

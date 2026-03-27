@@ -31,7 +31,7 @@ except ImportError:
 echo "============================================"
 echo "  RAT ROD v4 — HS-MTP (Hash-Space Multi-Token Prediction)"
 echo "  Seed: ${SEED}"
-echo "  4 hash-space heads, entropy-weighted, n-gram symbiotic"
+echo "  4 hash-space heads, CPU n-gram bridge weighted"
 echo "  Parallel Muon, XSA-all-11, No GPTQ"
 echo "  B-WING n-gram eval | QAT killed"
 echo "============================================"
@@ -48,7 +48,6 @@ TRIGRAM=0 \
 LATE_QAT_THRESHOLD=0 \
 HSMTP_NUM_HEADS=4 \
 HSMTP_LOSS_WEIGHT=0.3 \
-HSMTP_ENTROPY_WEIGHT=1 \
 NGRAM_EVAL_ORDER=9 \
 NGRAM_EVAL_MIN_ORDER=2 \
 NGRAM_EVAL_ADAPTIVE=1 \
