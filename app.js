@@ -43,6 +43,9 @@ function bindElements() {
     "sotaCards",
     "sotaChart",
     "sotaTableBody",
+    "bpbRankingBody",
+    "baseRankingBody",
+    "sizeRankingBody",
     "hypothesisCurrent",
     "hypothesisSupport",
     "hypothesisContradiction",
@@ -217,17 +220,23 @@ function renderHypothesis() {
 }
 
 function renderSotas() {
-  const sotas = Array.isArray(state.data?.personal_sotas) ? state.data.personal_sotas : [];
+  const sotas = Array.isArray(state.data?.favorite_considerations)
+    ? state.data.favorite_considerations
+    : Array.isArray(state.data?.personal_sotas)
+      ? state.data.personal_sotas
+      : [];
+  const rankings = state.data?.independent_rankings || {};
 
   els.sotaCards.innerHTML = sotas
     .map((item) => {
       const status = item.status || "unknown";
-      const value = Number.isFinite(item.value) ? formatNumber(item.value) : "n/a";
+      const value = formatConsiderationValue(item);
+      const metricUsed = item.metric_used || item.metric_key || "-";
       return `
         <article class="sota-card status-${escapeHtml(status)}">
           <span class="sota-label">${escapeHtml(item.label || item.category || "SOTA")}</span>
           <strong class="sota-value">${escapeHtml(value)}</strong>
-          <p class="sota-meta">${escapeHtml(item.run_tag || "untracked")} · ${escapeHtml(item.experiment_group || "n/a")}</p>
+          <p class="sota-meta">${escapeHtml(item.run_tag || "untracked")} · ${escapeHtml(item.experiment_group || "n/a")} · ${escapeHtml(metricUsed)}</p>
           <code class="sota-path">${escapeHtml(item.rel_path || "")}</code>
         </article>
       `;
@@ -237,11 +246,12 @@ function renderSotas() {
   els.sotaTableBody.innerHTML = sotas
     .map((item) => {
       const status = item.status || "unknown";
-      const value = Number.isFinite(item.value) ? formatNumber(item.value) : "n/a";
+      const value = formatConsiderationValue(item);
       return `
         <tr>
           <td>${escapeHtml(item.label || item.category || "-")}</td>
           <td><span class="metric-pill">${escapeHtml(value)}</span></td>
+          <td>${escapeHtml(item.metric_used || item.metric_key || "-")}</td>
           <td>${escapeHtml(item.run_tag || "untracked")}</td>
           <td><span class="status-pill status-${escapeHtml(status)}">${escapeHtml(status)}</span></td>
         </tr>
@@ -249,7 +259,34 @@ function renderSotas() {
     })
     .join("");
 
+  renderIndependentRanking(els.bpbRankingBody, rankings.best_bpb || []);
+  renderIndependentRanking(els.baseRankingBody, rankings.best_base_model || []);
+  renderIndependentRanking(els.sizeRankingBody, rankings.lowest_file_size || []);
+
   initSotaChart(sotas);
+}
+
+function renderIndependentRanking(target, rows) {
+  if (!target) return;
+  if (!rows.length) {
+    target.innerHTML = '<tr><td colspan="4" class="empty-cell">No ranked tests available.</td></tr>';
+    return;
+  }
+
+  target.innerHTML = rows
+    .slice(0, 10)
+    .map((row, index) => {
+      const value = formatConsiderationValue(row);
+      return `
+        <tr>
+          <td>#${index + 1}</td>
+          <td>${escapeHtml(value)}</td>
+          <td>${escapeHtml(row.metric_used || row.metric_key || "-")}</td>
+          <td>${escapeHtml(row.run_tag || "untracked")}</td>
+        </tr>
+      `;
+    })
+    .join("");
 }
 
 function initSotaChart(sotas) {
@@ -760,6 +797,27 @@ function formatNumber(value) {
   if (Math.abs(value) >= 100) return value.toFixed(2);
   if (Math.abs(value) >= 10) return value.toFixed(3);
   return value.toFixed(4);
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) return "n/a";
+  const units = ["B", "KB", "MB", "GB"];
+  let bytes = value;
+  let idx = 0;
+  while (bytes >= 1024 && idx < units.length - 1) {
+    bytes /= 1024;
+    idx += 1;
+  }
+  return `${bytes.toFixed(idx === 0 ? 0 : 2)} ${units[idx]}`;
+}
+
+function formatConsiderationValue(item) {
+  if (!item || !Number.isFinite(item.value)) return "n/a";
+  const metricUsed = (item.metric_used || item.metric_key || "").toLowerCase();
+  if (metricUsed === "model_size_bytes" || item.category === "lowest_file_size") {
+    return formatBytes(item.value);
+  }
+  return formatNumber(item.value);
 }
 
 function formatTimestamp(value) {

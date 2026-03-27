@@ -1,16 +1,16 @@
 {
-  "generated_at": "2026-03-27T19:26:01Z",
+  "generated_at": "2026-03-27T19:49:36Z",
   "source_roots": [
     "experiments",
     "results",
     "logs"
   ],
   "counts": {
-    "total_records": 619,
+    "total_records": 621,
     "by_category": {
       "env": 7,
-      "report": 35,
-      "run_log": 102,
+      "report": 36,
+      "run_log": 103,
       "script": 4,
       "summary": 1,
       "tsv_metric": 470
@@ -18,11 +18,11 @@
     "by_status": {
       "unknown": 513,
       "warn": 9,
-      "error": 72,
+      "error": 74,
       "ok": 25
     },
-    "with_metrics": 56,
-    "with_errors": 72,
+    "with_metrics": 58,
+    "with_errors": 74,
     "with_promote_notes": 15,
     "ablations": 3
   },
@@ -32,66 +32,808 @@
     "contradictory_signal": "Failure pressure remains high in remote_manual_ab_v6: [rank0]: Traceback (most recent call last): | E0327 17:34:59.290000 130284179744576 torch/distributed/elastic/multiprocessing/api.py:833] failed (exitcode: 1) local_rank: 0 (pid: 9280) of binary: /opt/conda/bin/python3 | Traceback (most recent call last): | raise ChildFailedError( | torch.distributed.elastic.multiprocessing.errors.ChildFailedError: | /workspace/parameter-golf-lab/experiments/GreenRod_X_1/lab_protocol_20260327/vast_tests/20260327_114840/manual_ab_v6_20260327_173452/runs/control_s1337/train_gpt_copy.",
     "next_test": "Promote a_xsa9 from remote_proxy_ab_v8_run2 into a longer canonical run, then cross-check it against the worst regression family before spending multi-GPU time."
   },
-  "personal_sotas": [
+  "favorite_considerations": [
     {
-      "category": "base_bpb",
-      "label": "Base BPB",
-      "metric_key": "val_bpb",
+      "category": "best_bpb",
+      "label": "Best BPB",
+      "metric_key": "best_bpb",
+      "metric_used": "val_bpb",
       "value": 0.32003867,
       "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
       "experiment_group": "logs",
       "status": "ok",
-      "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log"
+      "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+      "id": "run_log:193d7ab935a9456b"
     },
     {
-      "category": "sliding_bpb",
-      "label": "Sliding BPB",
-      "metric_key": "sliding_bpb",
-      "value": 0.91096316,
-      "run_tag": "bio_local_myelin_20260327_032513",
+      "category": "best_base_model",
+      "label": "Best Base Model",
+      "metric_key": "best_base_model",
+      "metric_used": "val_bpb",
+      "value": 0.32003867,
+      "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
       "experiment_group": "logs",
       "status": "ok",
-      "rel_path": "logs/bio_local_myelin_20260327_032513.log"
+      "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+      "id": "run_log:193d7ab935a9456b"
     },
     {
-      "category": "ngram9_bpb",
-      "label": "N-gram 9 BPB",
-      "metric_key": "ngram9_bpb",
-      "value": null,
-      "run_tag": "untracked",
-      "experiment_group": "n/a",
-      "status": "unknown",
-      "rel_path": ""
-    },
-    {
-      "category": "cap_val_bpb",
-      "label": "Cap Validation BPB",
-      "metric_key": "cap_val_bpb",
-      "value": 1.3504,
-      "run_tag": "warmdown_200s_20260327_060812",
-      "experiment_group": "results",
-      "status": "ok",
-      "rel_path": "results/ratrod_sweeps_remote_20260327_060812/warmdown_200s_20260327_060812.tsv"
-    },
-    {
-      "category": "diag_bpb",
-      "label": "Diagnostic BPB",
-      "metric_key": "diag_bpb",
-      "value": 1.1372,
-      "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620",
+      "category": "lowest_file_size",
+      "label": "Lowest File Size",
+      "metric_key": "lowest_file_size",
+      "metric_used": "model_size_bytes",
+      "value": 2235628.0,
+      "run_tag": "fxwing_micro_s1337_20260327_121316",
       "experiment_group": "logs",
       "status": "ok",
-      "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620.log"
+      "rel_path": "logs/fxwing_micro_s1337_20260327_121316.log",
+      "id": "run_log:bc0dd283a521b8f4"
+    }
+  ],
+  "independent_rankings": {
+    "best_bpb": [
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 0.32003867,
+        "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+        "id": "run_log:193d7ab935a9456b"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 0.4489,
+        "run_tag": "PROGRESS",
+        "experiment_group": "Rat_Rod",
+        "status": "ok",
+        "rel_path": "experiments/Rat_Rod/PROGRESS.md",
+        "id": "report:3962f3c74232ddec"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "sliding_bpb",
+        "value": 0.91096316,
+        "run_tag": "bio_local_myelin_20260327_032513",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/bio_local_myelin_20260327_032513.log",
+        "id": "run_log:6d6f250c132c6311"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "sliding_bpb",
+        "value": 0.91096316,
+        "run_tag": "myelin_s1337_20260327_032513",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/myelin_s1337_20260327_032513.log",
+        "id": "run_log:6a02c7d84f51ceee"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "sliding_bpb",
+        "value": 0.91394421,
+        "run_tag": "astrocyte_s1337_h512_20260327_064618",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/astrocyte_s1337_h512_20260327_064618.log",
+        "id": "run_log:8ce9be6cac910fb3"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "sliding_bpb",
+        "value": 0.91394421,
+        "run_tag": "bio_local_astrocyte_20260327_064618",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/bio_local_astrocyte_20260327_064618.log",
+        "id": "run_log:0aea7fbffef2b07c"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 0.96202763,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241.log",
+        "id": "run_log:1b29326362acdfba"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 0.96241564,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208.log",
+        "id": "run_log:9af50c91ef9e5c2a"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 0.96313917,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429.log",
+        "id": "run_log:34f37494a6305105"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.02166193,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500.log",
+        "id": "run_log:c71fed812d9b8511"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.04508523,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620.log",
+        "id": "run_log:ba702f7b804dcd6a"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.04598838,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133.log",
+        "id": "run_log:3dfe9d63f0a52a87"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.04709346,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357.log",
+        "id": "run_log:dca9bf39fa50e1c8"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "diag_bpb",
+        "value": 1.3169,
+        "run_tag": "ratrod_fastab_B_v1_plus_value_residual_s1337_20260327_054845",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_B_v1_plus_value_residual_s1337_20260327_054845.log",
+        "id": "run_log:aebe32812830874e"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "diag_bpb",
+        "value": 1.3191,
+        "run_tag": "ratrod_fastab_A_v1_s1337_20260327_054845",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_A_v1_s1337_20260327_054845.log",
+        "id": "run_log:8a8a83778616d01b"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.3504,
+        "run_tag": "sweep_warmdown_2000_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_2000_s1337_20260327_060812.log",
+        "id": "run_log:fefcd263bf592001"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.3773,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:c3e91890e66b4ac9"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.3773,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:7ac46b4b9b14956d"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.3775,
+        "run_tag": "sweep_warmdown_3500_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_3500_s1337_20260327_060812.log",
+        "id": "run_log:c7521d31391e7128"
+      },
+      {
+        "category": "best_bpb",
+        "label": "Best BPB",
+        "metric_key": "best_bpb",
+        "metric_used": "val_bpb",
+        "value": 1.3778,
+        "run_tag": "sweep_swa_50_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_50_s1337_20260327_062114.log",
+        "id": "run_log:dc54fd281394107c"
+      }
+    ],
+    "best_base_model": [
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 0.32003867,
+        "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+        "id": "run_log:193d7ab935a9456b"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 0.4489,
+        "run_tag": "PROGRESS",
+        "experiment_group": "Rat_Rod",
+        "status": "ok",
+        "rel_path": "experiments/Rat_Rod/PROGRESS.md",
+        "id": "report:3962f3c74232ddec"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 0.96202763,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241.log",
+        "id": "run_log:1b29326362acdfba"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 0.96241564,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208.log",
+        "id": "run_log:9af50c91ef9e5c2a"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 0.96313917,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429.log",
+        "id": "run_log:34f37494a6305105"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.02166193,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500.log",
+        "id": "run_log:c71fed812d9b8511"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.04508523,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620.log",
+        "id": "run_log:ba702f7b804dcd6a"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.04598838,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133.log",
+        "id": "run_log:3dfe9d63f0a52a87"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.04709346,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357.log",
+        "id": "run_log:dca9bf39fa50e1c8"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3188,
+        "run_tag": "ratrod_fastab_B_v1_plus_value_residual_s1337_20260327_054845",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_B_v1_plus_value_residual_s1337_20260327_054845.log",
+        "id": "run_log:aebe32812830874e"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3215,
+        "run_tag": "ratrod_fastab_A_v1_s1337_20260327_054845",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_A_v1_s1337_20260327_054845.log",
+        "id": "run_log:8a8a83778616d01b"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3504,
+        "run_tag": "sweep_warmdown_2000_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_2000_s1337_20260327_060812.log",
+        "id": "run_log:fefcd263bf592001"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3773,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:c3e91890e66b4ac9"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3773,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:7ac46b4b9b14956d"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3775,
+        "run_tag": "sweep_warmdown_3500_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_3500_s1337_20260327_060812.log",
+        "id": "run_log:c7521d31391e7128"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.3778,
+        "run_tag": "sweep_swa_50_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_50_s1337_20260327_062114.log",
+        "id": "run_log:dc54fd281394107c"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 1.4111,
+        "run_tag": "sweep_warmdown_5000_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_5000_s1337_20260327_060812.log",
+        "id": "run_log:f0f9fbc4080ab79d"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 2.8623,
+        "run_tag": "remote_proxy_ab_v8_run2",
+        "experiment_group": "GreenRod_X_1",
+        "status": "warn",
+        "rel_path": "experiments/GreenRod_X_1/lab_protocol_20260327/vast_tests/20260327_114840/remote_proxy_ab_v8_run2.log",
+        "id": "run_log:bfb8331575b2df33"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 3.34843893,
+        "run_tag": "fxwing_micro_s1337_20260327_121316",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/fxwing_micro_s1337_20260327_121316.log",
+        "id": "run_log:bc0dd283a521b8f4"
+      },
+      {
+        "category": "best_base_model",
+        "label": "Best Base Model",
+        "metric_key": "best_base_model",
+        "metric_used": "val_bpb",
+        "value": 4.6715,
+        "run_tag": "astrocyte_s1337_h512_20260327_064618",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/astrocyte_s1337_h512_20260327_064618.log",
+        "id": "run_log:8ce9be6cac910fb3"
+      }
+    ],
+    "lowest_file_size": [
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 2235628.0,
+        "run_tag": "fxwing_micro_s1337_20260327_121316",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/fxwing_micro_s1337_20260327_121316.log",
+        "id": "run_log:bc0dd283a521b8f4"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+        "id": "run_log:193d7ab935a9456b"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s2045_20260325_172241.log",
+        "id": "run_log:1b29326362acdfba"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s42_20260325_170429.log",
+        "id": "run_log:34f37494a6305105"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_backoff_7gram_adaptive_s7_20260325_174208.log",
+        "id": "run_log:9af50c91ef9e5c2a"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_025620.log",
+        "id": "run_log:ba702f7b804dcd6a"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s1337_20260325_164500.log",
+        "id": "run_log:c71fed812d9b8511"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s2045_20260325_033133.log",
+        "id": "run_log:3dfe9d63f0a52a87"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106047497.0,
+        "run_tag": "f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/f1_car02_iso_var_t2_rope24_ngram5_s42_20260325_031357.log",
+        "id": "run_log:dca9bf39fa50e1c8"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106145183.0,
+        "run_tag": "remote_proxy_ab_v8_run2",
+        "experiment_group": "GreenRod_X_1",
+        "status": "warn",
+        "rel_path": "experiments/GreenRod_X_1/lab_protocol_20260327/vast_tests/20260327_114840/remote_proxy_ab_v8_run2.log",
+        "id": "run_log:bfb8331575b2df33"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "ratrod_fastab_A_v1_s1337_20260327_054845",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_A_v1_s1337_20260327_054845.log",
+        "id": "run_log:8a8a83778616d01b"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_warmdown_2000_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_2000_s1337_20260327_060812.log",
+        "id": "run_log:fefcd263bf592001"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_warmdown_3500_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_3500_s1337_20260327_060812.log",
+        "id": "run_log:c7521d31391e7128"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_warmdown_5000_s1337_20260327_060812",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_060812/sweep_warmdown_5000_s1337_20260327_060812.log",
+        "id": "run_log:f0f9fbc4080ab79d"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:c3e91890e66b4ac9"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_swa_50_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/logs/sweep_swa_50_s1337_20260327_062114.log",
+        "id": "run_log:dc54fd281394107c"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158113.0,
+        "run_tag": "sweep_swa_100_s1337_20260327_062114",
+        "experiment_group": "results",
+        "status": "ok",
+        "rel_path": "results/ratrod_sweeps_remote_20260327_062114/sweep_swa_100_s1337_20260327_062114.log",
+        "id": "run_log:7ac46b4b9b14956d"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158518.0,
+        "run_tag": "bio_local_clonal_selection_20260327_100525",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/bio_local_clonal_selection_20260327_100525.log",
+        "id": "run_log:6f75a740aa34a8ed"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158518.0,
+        "run_tag": "bio_local_myelin_20260327_032513",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/bio_local_myelin_20260327_032513.log",
+        "id": "run_log:6d6f250c132c6311"
+      },
+      {
+        "category": "lowest_file_size",
+        "label": "Lowest File Size",
+        "metric_key": "lowest_file_size",
+        "metric_used": "model_size_bytes",
+        "value": 106158518.0,
+        "run_tag": "clonal_selection_s1337_k96_b64_20260327_100526",
+        "experiment_group": "logs",
+        "status": "ok",
+        "rel_path": "logs/clonal_selection_s1337_k96_b64_20260327_100526.log",
+        "id": "run_log:a5becf409dac893e"
+      }
+    ]
+  },
+  "personal_sotas": [
+    {
+      "category": "best_bpb",
+      "label": "Best BPB",
+      "metric_key": "best_bpb",
+      "metric_used": "val_bpb",
+      "value": 0.32003867,
+      "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
+      "experiment_group": "logs",
+      "status": "ok",
+      "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+      "id": "run_log:193d7ab935a9456b"
     },
     {
-      "category": "proxy_delta",
-      "label": "Proxy Delta",
-      "metric_key": "delta",
-      "value": -0.0086,
-      "run_tag": "remote_proxy_ab_v8_run2",
-      "experiment_group": "GreenRod_X_1",
-      "status": "warn",
-      "rel_path": "experiments/GreenRod_X_1/lab_protocol_20260327/vast_tests/20260327_114840/remote_proxy_ab_v8_run2.log"
+      "category": "best_base_model",
+      "label": "Best Base Model",
+      "metric_key": "best_base_model",
+      "metric_used": "val_bpb",
+      "value": 0.32003867,
+      "run_tag": "awing_green1_s1337_SOTA_0.3200_20260326",
+      "experiment_group": "logs",
+      "status": "ok",
+      "rel_path": "logs/awing_green1_s1337_SOTA_0.3200_20260326.log",
+      "id": "run_log:193d7ab935a9456b"
+    },
+    {
+      "category": "lowest_file_size",
+      "label": "Lowest File Size",
+      "metric_key": "lowest_file_size",
+      "metric_used": "model_size_bytes",
+      "value": 2235628.0,
+      "run_tag": "fxwing_micro_s1337_20260327_121316",
+      "experiment_group": "logs",
+      "status": "ok",
+      "rel_path": "logs/fxwing_micro_s1337_20260327_121316.log",
+      "id": "run_log:bc0dd283a521b8f4"
     }
   ],
   "ablations": [
@@ -217,7 +959,7 @@
       },
       {
         "name": "error",
-        "value": 72
+        "value": 74
       },
       {
         "name": "ok",
@@ -231,11 +973,11 @@
       },
       {
         "name": "report",
-        "value": 35
+        "value": 36
       },
       {
         "name": "run_log",
-        "value": 102
+        "value": 103
       },
       {
         "name": "script",
@@ -283,14 +1025,14 @@
         "day": "2026-03-27",
         "ok": 15,
         "warn": 8,
-        "error": 33,
+        "error": 34,
         "unknown": 17
       },
       {
         "day": "unknown",
         "ok": 2,
         "warn": 1,
-        "error": 33,
+        "error": 34,
         "unknown": 495
       }
     ],
@@ -629,6 +1371,26 @@
       "status": "ok",
       "notes": [],
       "snippet": "FX_Wing (static) on val_bpb at equivalent training compute. | **Key test**: does DeltaNet improve val_bpb vs B1? | | int6 gap < 0.2 BPB AND val_bpb \u2264 1.15 | Full win. Push to 8\u00d7H100. | Submit | | | int6 gap < 0.5 BPB, val_bpb competitive | Gap improved, not fixed. | Add per-loop scales | | | val_bpb worse than flat control (B3) | Crawler adds noise. | Park FX_Wing_Delta |",
+      "keywords": [
+        "decision"
+      ]
+    },
+    {
+      "id": "report:1a915170a53fbcd8",
+      "path": "/home/frosty40/parameter-golf-lab/experiments/FX_Wing_Sigma/HYPOTHESIS.md",
+      "rel_path": "experiments/FX_Wing_Sigma/HYPOTHESIS.md",
+      "category": "report",
+      "experiment_group": "FX_Wing_Sigma",
+      "run_tag": "HYPOTHESIS",
+      "timestamp_hint": "",
+      "metrics": {
+        "delta": 2.0
+      },
+      "status": "error",
+      "notes": [
+        "the previous component failed on. Here the n-gram is the first component and"
+      ],
+      "snippet": "the previous component failed on. Here the n-gram is the first component and | val_bpb or quant gap over FX_Wing_Delta? | | int6 gap < 0.2 AND val_bpb \u2264 1.12 | Sigma solves the regression AND matches SOTA | Submit | | | int6 gap < 0.5, val_bpb competitive | N-gram gating helps but quant needs per-loop scales | Add per-loop scales | | | val_bpb improves but int6 unchanged | Training benefit only, not quant benefit | Dig into why gate doesn't help quant |",
       "keywords": [
         "decision"
       ]
@@ -1162,6 +1924,7 @@
       "metrics": {
         "val_bpb": 2.8623,
         "diag_bpb": 3.6867,
+        "model_size_bytes": 106145183.0,
         "delta": -0.0086
       },
       "status": "warn",
@@ -1348,7 +2111,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.6472,
-        "diag_bpb": 3.7973
+        "diag_bpb": 3.7973,
+        "model_size_bytes": 106158518.0
       },
       "status": "error",
       "notes": [
@@ -1410,8 +2174,9 @@
       "run_tag": "725e1e4b-2b80-4181-a606-cb38567dbe06",
       "timestamp_hint": "",
       "metrics": {
-        "val_bpb": 3.84757214,
-        "diag_bpb": 3.843
+        "val_bpb": 3.34843893,
+        "diag_bpb": 3.843,
+        "model_size_bytes": 2235628.0
       },
       "status": "error",
       "notes": [
@@ -1532,7 +2297,8 @@
       "timestamp_hint": "20260324_160100",
       "metrics": {
         "val_bpb": 2.01141206,
-        "diag_bpb": 1.9539
+        "diag_bpb": 1.9539,
+        "model_size_bytes": 111963389.0
       },
       "status": "error",
       "notes": [
@@ -1564,7 +2330,8 @@
       "timestamp_hint": "20260324_182130",
       "metrics": {
         "val_bpb": 2.04163753,
-        "diag_bpb": 1.9603
+        "diag_bpb": 1.9603,
+        "model_size_bytes": 115242753.0
       },
       "status": "error",
       "notes": [
@@ -1596,7 +2363,8 @@
       "timestamp_hint": "20260324_211056",
       "metrics": {
         "val_bpb": 2.27006884,
-        "diag_bpb": 2.1937
+        "diag_bpb": 2.1937,
+        "model_size_bytes": 111964990.0
       },
       "status": "error",
       "notes": [
@@ -1658,6 +2426,7 @@
       "metrics": {
         "val_bpb": 4.7574,
         "diag_bpb": 3.8344,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 3.83434812
       },
       "status": "error",
@@ -1718,6 +2487,7 @@
       "metrics": {
         "val_bpb": 4.7226,
         "diag_bpb": 3.8343,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 0.91096316
       },
       "status": "error",
@@ -1751,6 +2521,7 @@
       "metrics": {
         "val_bpb": 4.6715,
         "diag_bpb": 3.8595,
+        "model_size_bytes": 106491450.0,
         "sliding_bpb": 0.91394421
       },
       "status": "ok",
@@ -1768,7 +2539,8 @@
       "timestamp_hint": "20260326",
       "metrics": {
         "val_bpb": 0.32003867,
-        "diag_bpb": 1.1374
+        "diag_bpb": 1.1374,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -1788,6 +2560,7 @@
       "metrics": {
         "val_bpb": 4.6715,
         "diag_bpb": 3.8595,
+        "model_size_bytes": 106491450.0,
         "sliding_bpb": 0.91394421
       },
       "status": "ok",
@@ -1833,6 +2606,7 @@
       "metrics": {
         "val_bpb": 4.7574,
         "diag_bpb": 3.8344,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 3.83434812
       },
       "status": "ok",
@@ -1853,6 +2627,7 @@
       "metrics": {
         "val_bpb": 4.7226,
         "diag_bpb": 3.8343,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 0.91096316
       },
       "status": "ok",
@@ -1898,6 +2673,7 @@
       "metrics": {
         "val_bpb": 4.7574,
         "diag_bpb": 3.8344,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 3.83434812
       },
       "status": "ok",
@@ -1916,6 +2692,7 @@
       "metrics": {
         "val_bpb": 4.6715,
         "diag_bpb": 3.8595,
+        "model_size_bytes": 106491450.0,
         "sliding_bpb": 0.91394421
       },
       "status": "error",
@@ -1948,7 +2725,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.9429,
-        "diag_bpb": 3.8752
+        "diag_bpb": 3.8752,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -1980,7 +2758,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.9479,
-        "diag_bpb": 3.8753
+        "diag_bpb": 3.8753,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -2012,7 +2791,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.9432,
-        "diag_bpb": 3.8753
+        "diag_bpb": 3.8753,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -2044,7 +2824,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.9389,
-        "diag_bpb": 3.8752
+        "diag_bpb": 3.8752,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -2076,7 +2857,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.9152,
-        "diag_bpb": 3.8555
+        "diag_bpb": 3.8555,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -2197,7 +2979,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.938,
-        "diag_bpb": 3.8752
+        "diag_bpb": 3.8752,
+        "model_size_bytes": 130951177.0
       },
       "status": "error",
       "notes": [
@@ -2229,7 +3012,8 @@
       "timestamp_hint": "",
       "metrics": {
         "val_bpb": 4.5122,
-        "diag_bpb": 3.9043
+        "diag_bpb": 3.9043,
+        "model_size_bytes": 131475465.0
       },
       "status": "error",
       "notes": [
@@ -2348,7 +3132,8 @@
       "timestamp_hint": "20260325_172241",
       "metrics": {
         "val_bpb": 0.96202763,
-        "diag_bpb": 1.1376
+        "diag_bpb": 1.1376,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2367,7 +3152,8 @@
       "timestamp_hint": "20260325_170429",
       "metrics": {
         "val_bpb": 0.96313917,
-        "diag_bpb": 1.1392
+        "diag_bpb": 1.1392,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2386,7 +3172,8 @@
       "timestamp_hint": "20260325_174208",
       "metrics": {
         "val_bpb": 0.96241564,
-        "diag_bpb": 1.1383
+        "diag_bpb": 1.1383,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2405,7 +3192,8 @@
       "timestamp_hint": "20260325_025620",
       "metrics": {
         "val_bpb": 1.04508523,
-        "diag_bpb": 1.1372
+        "diag_bpb": 1.1372,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2424,7 +3212,8 @@
       "timestamp_hint": "20260325_164500",
       "metrics": {
         "val_bpb": 1.02166193,
-        "diag_bpb": 1.1374
+        "diag_bpb": 1.1374,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2443,7 +3232,8 @@
       "timestamp_hint": "20260325_033133",
       "metrics": {
         "val_bpb": 1.04598838,
-        "diag_bpb": 1.1379
+        "diag_bpb": 1.1379,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2462,7 +3252,8 @@
       "timestamp_hint": "20260325_031357",
       "metrics": {
         "val_bpb": 1.04709346,
-        "diag_bpb": 1.1393
+        "diag_bpb": 1.1393,
+        "model_size_bytes": 106047497.0
       },
       "status": "ok",
       "notes": [],
@@ -2537,8 +3328,9 @@
       "run_tag": "fxwing_micro_s1337_20260327_121316",
       "timestamp_hint": "20260327_121316",
       "metrics": {
-        "val_bpb": 3.84757214,
-        "diag_bpb": 3.843
+        "val_bpb": 3.34843893,
+        "diag_bpb": 3.843,
+        "model_size_bytes": 2235628.0
       },
       "status": "ok",
       "notes": [],
@@ -2622,6 +3414,7 @@
       "metrics": {
         "val_bpb": 4.7226,
         "diag_bpb": 3.8343,
+        "model_size_bytes": 106158518.0,
         "sliding_bpb": 0.91096316
       },
       "status": "ok",
@@ -2744,7 +3537,8 @@
       "timestamp_hint": "20260327_014641",
       "metrics": {
         "val_bpb": 4.6472,
-        "diag_bpb": 3.7973
+        "diag_bpb": 3.7973,
+        "model_size_bytes": 106158518.0
       },
       "status": "error",
       "notes": [
@@ -2800,7 +3594,8 @@
       "timestamp_hint": "20260327_081321",
       "metrics": {
         "val_bpb": 2.08171159,
-        "diag_bpb": 2.1082
+        "diag_bpb": 2.1082,
+        "model_size_bytes": 51710118.0
       },
       "status": "error",
       "notes": [
@@ -2823,7 +3618,8 @@
       "timestamp_hint": "20260327_081322",
       "metrics": {
         "val_bpb": 2.08171159,
-        "diag_bpb": 2.1082
+        "diag_bpb": 2.1082,
+        "model_size_bytes": 51710118.0
       },
       "status": "error",
       "notes": [
@@ -3011,8 +3807,9 @@
       "run_tag": "fxwing_s1337_20260327_134149",
       "timestamp_hint": "20260327_134149",
       "metrics": {
-        "val_bpb": 4.64233382,
-        "diag_bpb": 2.8544
+        "val_bpb": 0.30808362,
+        "diag_bpb": 2.8544,
+        "model_size_bytes": 51841832.0
       },
       "status": "error",
       "notes": [
@@ -3035,6 +3832,38 @@
       ]
     },
     {
+      "id": "run_log:342fc71182534b46",
+      "path": "/home/frosty40/parameter-golf-lab/results/fxwing_vast_20260327_134149/fxwing_s1337_20260327_184333.log",
+      "rel_path": "results/fxwing_vast_20260327_134149/fxwing_s1337_20260327_184333.log",
+      "category": "run_log",
+      "experiment_group": "results",
+      "run_tag": "fxwing_s1337_20260327_184333",
+      "timestamp_hint": "20260327_134149",
+      "metrics": {
+        "val_bpb": 0.30808362,
+        "diag_bpb": 2.8544,
+        "model_size_bytes": 51841832.0
+      },
+      "status": "error",
+      "notes": [
+        "[rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009] Traceback (most recent call last):",
+        "[rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009]     raise BackendCompilerFailed(self.compiler_fn, e).with_traceback(",
+        "[rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009] torch._dynamo.exc.BackendCompilerFailed: backend='inductor' raised:",
+        "[rank0]:W0327 18:44:12.670000 140044233496384 torch/_dynamo/convert_frame.py:1009] Traceback (most recent call last):",
+        "[rank0]:W0327 18:44:12.670000 140044233496384 torch/_dynamo/convert_frame.py:1009]     raise BackendCompilerFailed(self.compiler_fn, e).with_traceback(",
+        "[rank0]:W0327 18:44:12.670000 140044233496384 torch/_dynamo/convert_frame.py:1009] torch._dynamo.exc.BackendCompilerFailed: backend='inductor' raised:",
+        "[rank0]:W0327 18:44:13.753000 140044233496384 torch/_dynamo/convert_frame.py:1009] Traceback (most recent call last):",
+        "[rank0]:W0327 18:44:13.753000 140044233496384 torch/_dynamo/convert_frame.py:1009]     raise BackendCompilerFailed(self.compiler_fn, e).with_traceback(",
+        "[rank0]:W0327 18:44:13.753000 140044233496384 torch/_dynamo/convert_frame.py:1009] torch._dynamo.exc.BackendCompilerFailed: backend='inductor' raised:",
+        "[rank0]:W0327 18:44:14.972000 140044233496384 torch/_dynamo/convert_frame.py:1009] Traceback (most recent call last):"
+      ],
+      "snippet": "val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model | [rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009] Traceback (most recent call last): | [rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009]     raise BackendCompilerFailed(self.compiler_fn, e).with_traceback( | [rank0]:W0327 18:44:06.617000 140044233496384 torch/_dynamo/convert_frame.py:1009] torch._dynamo.exc.BackendCompilerFailed: backend='inductor' ",
+      "keywords": [
+        "traceback",
+        "swa"
+      ]
+    },
+    {
       "id": "run_log:8a8a83778616d01b",
       "path": "/home/frosty40/parameter-golf-lab/results/ratrod_fastab_20260327_054845/ratrod_fastab_A_v1_s1337_20260327_054845.log",
       "rel_path": "results/ratrod_fastab_20260327_054845/ratrod_fastab_A_v1_s1337_20260327_054845.log",
@@ -3044,7 +3873,8 @@
       "timestamp_hint": "20260327_054845",
       "metrics": {
         "val_bpb": 1.3215,
-        "diag_bpb": 1.3191
+        "diag_bpb": 1.3191,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3063,7 +3893,8 @@
       "timestamp_hint": "20260327_054845",
       "metrics": {
         "val_bpb": 1.3188,
-        "diag_bpb": 1.3169
+        "diag_bpb": 1.3169,
+        "model_size_bytes": 106161516.0
       },
       "status": "ok",
       "notes": [],
@@ -3082,7 +3913,8 @@
       "timestamp_hint": "20260327_060812",
       "metrics": {
         "val_bpb": 1.3504,
-        "diag_bpb": 1.3979
+        "diag_bpb": 1.3979,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3101,7 +3933,8 @@
       "timestamp_hint": "20260327_060812",
       "metrics": {
         "val_bpb": 1.3775,
-        "diag_bpb": 1.4344
+        "diag_bpb": 1.4344,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3120,7 +3953,8 @@
       "timestamp_hint": "20260327_060812",
       "metrics": {
         "val_bpb": 1.4111,
-        "diag_bpb": 1.4764
+        "diag_bpb": 1.4764,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3139,7 +3973,8 @@
       "timestamp_hint": "20260327_062114",
       "metrics": {
         "val_bpb": 1.3773,
-        "diag_bpb": 1.4335
+        "diag_bpb": 1.4335,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3158,7 +3993,8 @@
       "timestamp_hint": "20260327_062114",
       "metrics": {
         "val_bpb": 1.3778,
-        "diag_bpb": 1.4354
+        "diag_bpb": 1.4354,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],
@@ -3177,7 +4013,8 @@
       "timestamp_hint": "20260327_062114",
       "metrics": {
         "val_bpb": 1.3773,
-        "diag_bpb": 1.4335
+        "diag_bpb": 1.4335,
+        "model_size_bytes": 106158113.0
       },
       "status": "ok",
       "notes": [],

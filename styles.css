@@ -361,6 +361,25 @@ tbody td,
   letter-spacing: 0.12em;
 }
 
+.ranking-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ranking-panel {
+  border: 1px solid rgba(124, 227, 216, 0.14);
+  border-radius: var(--radius-sm);
+  background: rgba(6, 11, 16, 0.78);
+  padding: 10px;
+}
+
+.ranking-panel h3 {
+  margin-bottom: 8px;
+  color: var(--cold);
+}
+
 .hypothesis-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -755,7 +774,8 @@ tbody td {
 
   .sota-layout,
   .chart-grid,
-  .hypothesis-grid {
+  .hypothesis-grid,
+  .ranking-grid {
     grid-template-columns: 1fr;
   }
 
