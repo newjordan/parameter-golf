@@ -1723,6 +1723,10 @@ def main() -> None:
             zero_grad_all()
             for micro_step in range(grad_accum_steps):
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                if ngram_bridge is not None:
+                    x_cpu = x.cpu()
+                    base_model._hsmtp_w = ngram_bridge.get_weights(x_cpu, device)
+                    ngram_bridge.submit(x_cpu)
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                     warmup_loss = model(x, y)
                 (warmup_loss * grad_scale).backward()
