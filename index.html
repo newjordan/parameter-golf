@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Parameter Golf Research Hub // Tech Noir</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="scene scene-a"></div>
+  <div class="scene scene-b"></div>
+  <div class="scanlines"></div>
+  <div class="grid-fade"></div>
+
+  <header class="shell masthead">
+    <section class="title-block panel panel-hero">
+      <p class="eyebrow">Parameter Golf // Science Control</p>
+      <h1>Research Hub</h1>
+      <p class="lede">Tech noir command deck for triaging runs, comparing signals, inspecting failures, and keeping the garage organized under pressure.</p>
+      <div class="header-rail">
+        <div class="rail-chip">
+          <span>Scope</span>
+          <strong id="scopeLabel">Loading</strong>
+        </div>
+        <div class="rail-chip">
+          <span>Generated</span>
+          <strong id="generatedAt">Loading</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel panel-briefing">
+      <p class="panel-kicker">Briefing</p>
+      <ul class="briefing-list">
+        <li>Search records by path, notes, metrics, and snippets.</li>
+        <li>Rank by BPB metrics or proxy delta to surface promising lanes fast.</li>
+        <li>Inspect record evidence without opening raw files unless needed.</li>
+      </ul>
+    </section>
+  </header>
+
+  <main class="shell shell-grid">
+    <section class="summary-grid" aria-label="Summary cards">
+      <article class="panel stat-card">
+        <span class="stat-label">Total records</span>
+        <strong id="statTotal">0</strong>
+        <small>Indexed reports, logs, scripts, and metrics.</small>
+      </article>
+      <article class="panel stat-card ok-card">
+        <span class="stat-label">Stable signal</span>
+        <strong id="statOk">0</strong>
+        <small>Records with metrics and no detected failure markers.</small>
+      </article>
+      <article class="panel stat-card warn-card">
+        <span class="stat-label">Watchlist</span>
+        <strong id="statWarn">0</strong>
+        <small>Proxy runs, decisions, and promotable but uncertain evidence.</small>
+      </article>
+      <article class="panel stat-card error-card">
+        <span class="stat-label">Failures</span>
+        <strong id="statError">0</strong>
+        <small>Tracebacks, OOMs, shard mismatches, and broken runs.</small>
+      </article>
+      <article class="panel stat-card metric-card">
+        <span class="stat-label">Best metric</span>
+        <strong id="bestMetricValue">-</strong>
+        <small id="bestMetricLabel">Select a metric to rank records.</small>
+      </article>
+    </section>
+
+    <section class="control-band panel" aria-label="Controls and active filters">
+      <div class="control-heading">
+        <div>
+          <p class="panel-kicker">Filters</p>
+          <h2>Command Deck</h2>
+        </div>
+        <p id="activeQuery" class="active-query">No active filter</p>
+      </div>
+
+      <div class="control-grid">
+        <label class="control-field control-search">
+          <span>Global search</span>
+          <input id="searchInput" type="search" placeholder="Search path, notes, metrics, snippets">
+        </label>
+        <label class="control-field">
+          <span>Category</span>
+          <select id="categoryFilter"></select>
+        </label>
+        <label class="control-field">
+          <span>Status</span>
+          <select id="statusFilter">
+            <option value="all">All</option>
+            <option value="ok">ok</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Metric rank</span>
+          <select id="metricSelect"></select>
+        </label>
+        <label class="control-field">
+          <span>Direction</span>
+          <select id="sortDir">
+            <option value="asc">Ascending</option>
+            <option value="desc">Descending</option>
+          </select>
+        </label>
+        <button id="resetBtn" class="control-button" type="button">Reset filters</button>
+      </div>
+
+      <div class="ops-strip">
+        <div class="ops-chip">
+          <span>Visible records</span>
+          <strong id="visibleCount">0</strong>
+        </div>
+        <div class="ops-chip">
+          <span>Experiment groups</span>
+          <strong id="visibleExperiments">0</strong>
+        </div>
+        <div class="ops-chip">
+          <span>Visible errors</span>
+          <strong id="visibleErrors">0</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="content-grid">
+      <section class="panel results-panel" aria-label="Indexed records">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Records</p>
+            <h2>Evidence Ledger</h2>
+          </div>
+          <p id="resultCount" class="panel-meta">Loading index...</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Record</th>
+                <th>Experiment</th>
+                <th>Signal</th>
+                <th>Path</th>
+              </tr>
+            </thead>
+            <tbody id="recordsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="panel detail-panel" aria-label="Selected record details">
+        <div class="panel-head detail-head">
+          <div>
+            <p class="panel-kicker">Selected Record</p>
+            <h2 id="detailTitle">Awaiting selection</h2>
+          </div>
+          <button id="copyPathBtn" class="control-button subtle" type="button" disabled>Copy path</button>
+        </div>
+
+        <div class="detail-banner">
+          <span id="detailStatusBadge" class="status-pill">unknown</span>
+          <code id="detailPathCode">No path selected.</code>
+        </div>
+
+        <dl id="detailMeta" class="detail-meta"></dl>
+
+        <section class="detail-section">
+          <h3>Metrics</h3>
+          <div id="detailMetrics" class="metric-grid"></div>
+        </section>
+
+        <section class="detail-section">
+          <h3>Notes</h3>
+          <ul id="detailNotes" class="notes-list"></ul>
+        </section>
+
+        <section class="detail-section">
+          <h3>Snippet</h3>
+          <pre id="detailSnippet">No record selected.</pre>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
