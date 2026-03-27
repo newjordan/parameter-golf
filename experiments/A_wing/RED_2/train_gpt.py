@@ -9,12 +9,11 @@ import subprocess
 import sys
 import time
 import uuid
-import lzma
 import zlib
 from pathlib import Path
 try:
     import zstandard
-    _COMPRESSOR = "lzma"  # lzma primary, zstd fallback for decompression compat
+    _COMPRESSOR = "zstd"
 except ImportError:
     import warnings
     warnings.warn("zstandard not found — falling back to zlib. Artifact will be ~1.5MB larger! pip install zstandard")
@@ -127,9 +126,31 @@ class Hyperparameters:
     ngram_eval_min_count = int(os.environ.get("NGRAM_EVAL_MIN_COUNT", 2))
     ngram_eval_buckets = int(os.environ.get("NGRAM_EVAL_BUCKETS", 4_194_304))
     ngram_eval_max_seconds = float(os.environ.get("NGRAM_EVAL_MAX_SECONDS", 0.0))
+    ngram_eval_alpha_clip = float(os.environ.get("NGRAM_EVAL_ALPHA_CLIP", 0.95))
+    ngram_logit_mix = bool(int(os.environ.get("NGRAM_LOGIT_MIX", "0")))
+    ngram_logit_mix_eps = float(os.environ.get("NGRAM_LOGIT_MIX_EPS", 1e-6))
+    ngram_use_learned_alpha = bool(int(os.environ.get("NGRAM_USE_LEARNED_ALPHA", "1")))
+    ngram_fixed_share_gamma = float(os.environ.get("NGRAM_FIXED_SHARE_GAMMA", 0.0))
+    ngram_fixed_share_eta = float(os.environ.get("NGRAM_FIXED_SHARE_ETA", 0.08))
+    ngram_fixed_share_min_chunk_tokens = int(os.environ.get("NGRAM_FIXED_SHARE_MIN_CHUNK_TOKENS", 4096))
     ngram_entropy_shift = bool(int(os.environ.get("NGRAM_ENTROPY_SHIFT", "0")))  # per-order center shift
+    ngram_entropy_shift_per_order = float(os.environ.get("NGRAM_ENTROPY_SHIFT_PER_ORDER", 0.25))
     ngram_order_mults_str = os.environ.get("NGRAM_ORDER_MULTS", "")  # fixed per-order multipliers (comma-sep)
     cubric_cadence = int(os.environ.get("CUBRIC_CADENCE", 0))
+    complement_noise_floor = int(os.environ.get("COMPLEMENT_NOISE_FLOOR", 3))
+    complement_noise_weight = float(os.environ.get("COMPLEMENT_NOISE_WEIGHT", 0.85))
+    # Learned mixer head: train a tiny linear head to predict per-token expert weights
+    mixer_enabled = bool(int(os.environ.get("MIXER_ENABLED", "0")))
+    mixer_n_orders = int(os.environ.get("MIXER_N_ORDERS", 11))  # n-gram orders 2..12
+    mixer_loss_weight = float(os.environ.get("MIXER_LOSS_WEIGHT", 0.1))
+    mixer_neural_floor = float(os.environ.get("MIXER_NEURAL_FLOOR", 0.05))
+    mixer_buckets = int(os.environ.get("MIXER_BUCKETS", 8_388_608))  # 8M for training oracle
+    mixer_prefill_max_shards = int(os.environ.get("MIXER_PREFILL_MAX_SHARDS", 80))
+    mixer_prefill_max_seconds = float(os.environ.get("MIXER_PREFILL_MAX_SECONDS", 0.0))  # 0 = unlimited
+    mixer_prefill_min_shards = int(os.environ.get("MIXER_PREFILL_MIN_SHARDS", 1))
+    mixer_prefill_tokens_per_shard = int(os.environ.get("MIXER_PREFILL_TOKENS_PER_SHARD", 0))  # 0 = full shard
+    mixer_gpu_mode = bool(int(os.environ.get("MIXER_GPU_MODE", "1")))  # GPU oracle/prefill on CUDA
+    mixer_prefill_pos_chunk = int(os.environ.get("MIXER_PREFILL_POS_CHUNK", 1_000_000))
     compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
     compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
 def maybe_torch_compile(obj, args: Hyperparameters):
@@ -138,11 +159,22 @@ def maybe_torch_compile(obj, args: Hyperparameters):
     return torch.compile(obj, dynamic=False, fullgraph=args.compile_fullgraph)
 class TrainNgramTracker:
     """Complementary training: track bigram stats, downweight tokens n-grams can predict."""
-    def __init__(self, vocab_size: int, device: torch.device, complement_alpha: float = 0.5):
+    def __init__(
+        self,
+        vocab_size: int,
+        device: torch.device,
+        complement_alpha: float = 0.5,
+        noise_floor: int = 3,
+        noise_weight: float = 0.85,
+    ):
         self.V = vocab_size
         self.alpha = complement_alpha
+        self.noise_floor = max(int(noise_floor), 0)
+        self.noise_weight = float(np.clip(noise_weight, 0.1, 1.0))
         self.bi_counts = torch.zeros(vocab_size, vocab_size, device=device, dtype=torch.float32)
         self.bi_totals = torch.zeros(vocab_size, device=device, dtype=torch.float32)
+        self.uni_counts = torch.zeros(vocab_size, device=device, dtype=torch.float32)
+        self.total_seen = 0.0
     @torch.no_grad()
     def update(self, x: Tensor, y: Tensor):
         xf = x.reshape(-1)
@@ -150,13 +182,21 @@ class TrainNgramTracker:
         ones = torch.ones(xf.numel(), device=xf.device, dtype=torch.float32)
         self.bi_counts.reshape(-1).scatter_add_(0, xf * self.V + yf, ones)
         self.bi_totals.scatter_add_(0, xf, ones)
+        self.uni_counts.scatter_add_(0, yf, ones)
+        self.total_seen += float(xf.numel())
     def get_weights(self, x: Tensor, y: Tensor) -> Tensor:
         xf = x.reshape(-1)
         yf = y.reshape(-1)
         total = self.bi_totals[xf]
         count = self.bi_counts.reshape(-1)[xf * self.V + yf]
         ngram_prob = count / (total + 1)
-        return (1.0 - self.alpha * ngram_prob).clamp(min=0.1)
+        weights = (1.0 - self.alpha * ngram_prob).clamp(min=0.1)
+        # Three-tier token weighting: also downweight persistent rare/noisy targets.
+        if self.noise_floor > 0 and self.noise_weight < 1.0 and self.total_seen >= 200_000:
+            rare_mask = self.uni_counts[yf] <= float(self.noise_floor)
+            if rare_mask.any():
+                weights = torch.where(rare_mask, weights * self.noise_weight, weights)
+        return weights.clamp(min=0.05)
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
@@ -707,6 +747,225 @@ class Block(nn.Module):
             gate = torch.sigmoid(self.dtg_gate(x_in.detach()))
             x_out = x_in + gate * (x_out - x_in)
         return x_out
+# 12 primes for XOR hashing — shared between training oracle and eval tables
+NGRAM_PRIMES = np.array(
+    [np.uint64(36313), np.uint64(27191), np.uint64(51647), np.uint64(81929),
+     np.uint64(131071), np.uint64(174763), np.uint64(233017), np.uint64(283721),
+     np.uint64(347237), np.uint64(401519), np.uint64(479909), np.uint64(541267)],
+    dtype=np.uint64,
+)
+
+class TrainNgramOracle:
+    """Training-time n-gram oracle: prefilled from training data, frozen during training.
+    Used to supervise the learned mixer head — NOT used at eval time."""
+    def __init__(self, buckets: int, min_order: int = 2, max_order: int = 12, min_count: int = 2):
+        self.buckets = buckets
+        self.min_order = min_order
+        self.max_order = max_order
+        self.min_count = min_count
+        self.mask = np.uint64(buckets - 1)
+        self.primes = NGRAM_PRIMES
+        self.n_orders = max_order - min_order + 1
+        self.ctx_tables = {n: np.zeros(buckets, dtype=np.uint32) for n in range(min_order, max_order + 1)}
+        self.full_tables = {n: np.zeros(buckets, dtype=np.uint32) for n in range(min_order, max_order + 1)}
+        self.total_tokens = 0
+
+    def prefill_shard(self, filepath: str, max_tokens: int = 0) -> int:
+        """Load a training shard and update hash tables. Returns token count."""
+        count = int(max_tokens) if max_tokens and max_tokens > 0 else -1
+        raw = np.fromfile(filepath, dtype=np.uint16, count=count)
+        t = raw.astype(np.uint64)
+        n = len(t)
+        self.total_tokens += n
+        for order in range(self.min_order, self.max_order + 1):
+            if n < order:
+                continue
+            ctx_width = order - 1
+            length = n - order + 1
+            ctx_hash = np.zeros(length, dtype=np.uint64)
+            for k in range(ctx_width):
+                ctx_hash ^= t[k:k + length] * self.primes[k % len(self.primes)]
+            ctx_key = (ctx_hash & self.mask).astype(np.int64)
+            tgt = t[order - 1:order - 1 + length]
+            full_key = ((ctx_hash ^ (tgt * self.primes[ctx_width % len(self.primes)])) & self.mask).astype(np.int64)
+            self.ctx_tables[order] += np.bincount(ctx_key, minlength=self.buckets).astype(np.uint32)
+            self.full_tables[order] += np.bincount(full_key, minlength=self.buckets).astype(np.uint32)
+        return n
+
+    def get_ngram_probs(self, x_batch: Tensor, y_batch: Tensor) -> tuple[Tensor, Tensor]:
+        """Get per-order n-gram probabilities for a training batch.
+        Returns (order_p, order_valid) both shaped (bsz, seq_len, n_orders).
+        order_p[..., i] is probability from order (min_order+i).
+        order_valid[..., i] is True where ctx_count >= min_count."""
+        x_np = x_batch.cpu().numpy().astype(np.uint64)
+        y_np = y_batch.cpu().numpy().astype(np.uint64)
+        bsz, slen = x_np.shape
+        order_p = np.full((bsz, slen, self.n_orders), 1.0 / 1024.0, dtype=np.float32)
+        order_valid = np.zeros((bsz, slen, self.n_orders), dtype=np.bool_)
+        for oi, order in enumerate(range(self.min_order, self.max_order + 1)):
+            ctx_width = order - 1
+            if slen < ctx_width:
+                continue
+            # Build context hash from x_batch (context tokens)
+            # For order n, context is x[pos-cw+1:pos+1], target is y[pos]
+            # x_batch[b, j] is input at position j, y_batch[b, j] is target at position j
+            # Context for position j: tokens at positions j-cw+1 .. j (= x[j-cw+1], ..., x[j])
+            # But x_batch is the input sequence, where x[j] predicts y[j]
+            # For n-gram: we need the last (order-1) input tokens as context, and y[j] as target
+            ctx_hash = np.zeros((bsz, slen), dtype=np.uint64)
+            for k in range(ctx_width):
+                shift = ctx_width - 1 - k
+                if shift > 0:
+                    ctx_hash[:, shift:] ^= x_np[:, :slen - shift] * self.primes[k % len(self.primes)]
+                else:
+                    ctx_hash ^= x_np * self.primes[k % len(self.primes)]
+            ctx_key = (ctx_hash & self.mask).astype(np.int64)
+            full_key = ((ctx_hash ^ (y_np * self.primes[ctx_width % len(self.primes)])) & self.mask).astype(np.int64)
+            ctx_c = self.ctx_tables[order][ctx_key.ravel()].astype(np.float32).reshape(bsz, slen)
+            full_c = self.full_tables[order][full_key.ravel()].astype(np.float32).reshape(bsz, slen)
+            p = np.minimum(full_c, ctx_c) / np.maximum(ctx_c, 1.0)
+            p = np.clip(p, 0.0, 1.0)
+            valid = ctx_c >= self.min_count
+            if ctx_width > 0:
+                valid[:, :ctx_width] = False
+            order_p[:, :, oi] = np.where(valid, p, order_p[:, :, oi])
+            order_valid[:, :, oi] = valid
+        return (
+            torch.from_numpy(order_p),
+            torch.from_numpy(order_valid),
+        )
+
+
+class TrainNgramOracleGPU:
+    """GPU-native training-time n-gram oracle for mixer supervision."""
+    def __init__(
+        self,
+        buckets: int,
+        min_order: int = 2,
+        max_order: int = 12,
+        min_count: int = 2,
+        device: torch.device | None = None,
+        pos_chunk: int = 1_000_000,
+    ):
+        if device is None:
+            raise ValueError("TrainNgramOracleGPU requires an explicit CUDA device")
+        self.device = device
+        self.buckets = buckets
+        self.min_order = min_order
+        self.max_order = max_order
+        self.min_count = min_count
+        self.n_orders = max_order - min_order + 1
+        self.pos_chunk = max(1, int(pos_chunk))
+        self.total_tokens = 0
+        self.mask = int(buckets - 1)
+        self.mask_t = torch.tensor(self.mask, device=device, dtype=torch.int64)
+        self.primes = torch.tensor(NGRAM_PRIMES.astype(np.int64), device=device, dtype=torch.int64)
+        self.ctx_tables = {n: torch.zeros(buckets, device=device, dtype=torch.int64) for n in range(min_order, max_order + 1)}
+        self.full_tables = {n: torch.zeros(buckets, device=device, dtype=torch.int64) for n in range(min_order, max_order + 1)}
+
+    def prefill_shard(self, filepath: str, max_tokens: int = 0) -> int:
+        count = int(max_tokens) if max_tokens and max_tokens > 0 else -1
+        raw = np.fromfile(filepath, dtype=np.uint16, count=count)
+        if raw.size == 0:
+            return 0
+        t = torch.from_numpy(raw.astype(np.int64, copy=False)).to(device=self.device, dtype=torch.int64)
+        n = int(t.numel())
+        self.total_tokens += n
+        npr = int(self.primes.numel())
+
+        for order in range(self.min_order, self.max_order + 1):
+            if n < order:
+                continue
+            ctx_width = order - 1
+            length = n - order + 1
+            p_ctx = self.primes[ctx_width % npr]
+            for pos0 in range(0, length, self.pos_chunk):
+                m = min(self.pos_chunk, length - pos0)
+                ctx_hash = torch.zeros(m, device=self.device, dtype=torch.int64)
+                for k in range(ctx_width):
+                    tok = t[k + pos0 : k + pos0 + m]
+                    ctx_hash.bitwise_xor_(tok * self.primes[k % npr])
+                ctx_key = torch.bitwise_and(ctx_hash, self.mask_t)
+                tgt = t[order - 1 + pos0 : order - 1 + pos0 + m]
+                full_key = torch.bitwise_and(torch.bitwise_xor(ctx_hash, tgt * p_ctx), self.mask_t)
+                self.ctx_tables[order].add_(torch.bincount(ctx_key, minlength=self.buckets))
+                self.full_tables[order].add_(torch.bincount(full_key, minlength=self.buckets))
+        return n
+
+    def get_ngram_probs(self, x_batch: Tensor, y_batch: Tensor) -> tuple[Tensor, Tensor]:
+        x = x_batch.to(device=self.device, dtype=torch.int64, non_blocking=True)
+        y = y_batch.to(device=self.device, dtype=torch.int64, non_blocking=True)
+        bsz, slen = x.shape
+        order_p = torch.full((bsz, slen, self.n_orders), 1.0 / 1024.0, device=self.device, dtype=torch.float32)
+        order_valid = torch.zeros((bsz, slen, self.n_orders), device=self.device, dtype=torch.bool)
+        npr = int(self.primes.numel())
+
+        for oi, order in enumerate(range(self.min_order, self.max_order + 1)):
+            ctx_width = order - 1
+            if slen < ctx_width:
+                continue
+            ctx_hash = torch.zeros((bsz, slen), device=self.device, dtype=torch.int64)
+            for k in range(ctx_width):
+                shift = ctx_width - 1 - k
+                p = self.primes[k % npr]
+                if shift > 0:
+                    ctx_hash[:, shift:].bitwise_xor_(x[:, :slen - shift] * p)
+                else:
+                    ctx_hash.bitwise_xor_(x * p)
+            ctx_key = torch.bitwise_and(ctx_hash, self.mask_t)
+            full_key = torch.bitwise_and(
+                torch.bitwise_xor(ctx_hash, y * self.primes[ctx_width % npr]),
+                self.mask_t,
+            )
+            ctx_c = self.ctx_tables[order].gather(0, ctx_key.reshape(-1)).reshape(bsz, slen).to(dtype=torch.float32)
+            full_c = self.full_tables[order].gather(0, full_key.reshape(-1)).reshape(bsz, slen).to(dtype=torch.float32)
+            p = torch.minimum(full_c, ctx_c) / torch.maximum(ctx_c, torch.ones_like(ctx_c))
+            p = p.clamp_(0.0, 1.0)
+            valid = ctx_c >= float(self.min_count)
+            if ctx_width > 0:
+                valid[:, :ctx_width] = False
+            order_p[:, :, oi] = torch.where(valid, p, order_p[:, :, oi])
+            order_valid[:, :, oi] = valid
+        return order_p, order_valid
+
+
+def broadcast_train_mixer_tables(train_mixer: TrainNgramOracle, rank: int, device: torch.device):
+    """Broadcast rank-0 prefilled mixer tables to all ranks via NCCL."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    if rank == 0:
+        meta = torch.tensor([train_mixer.total_tokens], device=device, dtype=torch.int64)
+    else:
+        meta = torch.zeros(1, device=device, dtype=torch.int64)
+    dist.broadcast(meta, src=0)
+    train_mixer.total_tokens = int(meta.item())
+
+    for order in range(train_mixer.min_order, train_mixer.max_order + 1):
+        if rank == 0:
+            ctx_src = train_mixer.ctx_tables[order].view(np.int32)
+            full_src = train_mixer.full_tables[order].view(np.int32)
+            ctx_t = torch.from_numpy(ctx_src).to(device=device, dtype=torch.int32, non_blocking=True)
+            full_t = torch.from_numpy(full_src).to(device=device, dtype=torch.int32, non_blocking=True)
+        else:
+            ctx_t = torch.empty(train_mixer.buckets, device=device, dtype=torch.int32)
+            full_t = torch.empty(train_mixer.buckets, device=device, dtype=torch.int32)
+        dist.broadcast(ctx_t, src=0)
+        dist.broadcast(full_t, src=0)
+        train_mixer.ctx_tables[order] = ctx_t.cpu().numpy().view(np.uint32).copy()
+        train_mixer.full_tables[order] = full_t.cpu().numpy().view(np.uint32).copy()
+
+
+def all_reduce_train_mixer_tables_gpu(train_mixer: TrainNgramOracleGPU, device: torch.device):
+    """All-reduce GPU-resident mixer tables across ranks."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    total = torch.tensor([train_mixer.total_tokens], device=device, dtype=torch.int64)
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    train_mixer.total_tokens = int(total.item())
+    for order in range(train_mixer.min_order, train_mixer.max_order + 1):
+        dist.all_reduce(train_mixer.ctx_tables[order], op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_mixer.full_tables[order], op=dist.ReduceOp.SUM)
+
 class GPT(nn.Module):
     def __init__(
         self,
@@ -736,6 +995,9 @@ class GPT(nn.Module):
         mlp_leaky_slope: float = 0.5,
         f1_corr_rank: int = 0,
         f1_corr_scale_init: float = 0.10,
+        mixer_n_experts: int = 0,
+        mixer_loss_weight: float = 0.1,
+        mixer_neural_floor: float = 0.05,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -807,10 +1069,24 @@ class GPT(nn.Module):
             self.f1_corr_in = None
             self.f1_corr_out = None
             self.f1_corr_scale = None
+        # Learned mixer head: predicts per-token expert weights for n-gram blending
+        self.mixer_n_experts = mixer_n_experts
+        self.mixer_loss_weight = mixer_loss_weight
+        self.mixer_neural_floor = mixer_neural_floor
+        if mixer_n_experts > 0:
+            self.alpha_head = nn.Linear(model_dim, mixer_n_experts, bias=True)
+        else:
+            self.alpha_head = None
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
         self._init_weights()
+        # Special init for alpha_head: zeros + bias[0]=2.0 (favor neural initially)
+        if self.alpha_head is not None:
+            nn.init.zeros_(self.alpha_head.weight)
+            nn.init.zeros_(self.alpha_head.bias)
+            with torch.no_grad():
+                self.alpha_head.bias[0] = 2.0
     def _init_weights(self) -> None:
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
@@ -833,7 +1109,8 @@ class GPT(nn.Module):
         ve_base = ve_cache['ve'] if ve_cache is not None else self.ve_shared(input_ids)
         ve_idx = self.ve_layer_indices.index(layer_idx)
         return ve_base * self.ve_layer_scales[ve_idx].to(dtype=ve_base.dtype)
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def forward(self, input_ids: Tensor, target_ids: Tensor,
+                ngram_expert_p: Tensor | None = None, ngram_valid_mask: Tensor | None = None) -> Tensor:
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
             x = x + self.bigram(input_ids)
@@ -888,6 +1165,31 @@ class GPT(nn.Module):
                 mtp_loss_count += 1
             if mtp_loss_count > 0:
                 main_loss = main_loss + self.mtp_loss_weight * (mtp_loss_sum / mtp_loss_count)
+        # Mixer loss: train alpha_head to blend neural + n-gram experts
+        if (self.training and self.alpha_head is not None and self.mixer_loss_weight > 0
+                and ngram_expert_p is not None and ngram_valid_mask is not None):
+            alpha_raw = self.alpha_head(x_flat.float())  # (N, n_experts)
+            # Neural probability for the correct target token
+            with torch.no_grad():
+                neural_p = F.softmax(logits.float(), dim=-1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            # Stack experts: [neural, order2, order3, ..., orderN]
+            ngram_p_flat = ngram_expert_p.reshape(-1, ngram_expert_p.size(-1))  # (N, n_orders)
+            ngram_v_flat = ngram_valid_mask.reshape(-1, ngram_valid_mask.size(-1))  # (N, n_orders)
+            expert_p = torch.cat([neural_p.unsqueeze(1), ngram_p_flat.to(dtype=neural_p.dtype)], dim=1)
+            full_mask = torch.cat([
+                torch.ones(targets.size(0), 1, device=targets.device, dtype=torch.bool),
+                ngram_v_flat.to(device=targets.device),
+            ], dim=1)
+            gate = alpha_raw.masked_fill(~full_mask, -1e9)
+            weights = F.softmax(gate, dim=-1)
+            # Neural floor: ensure ≥ mixer_neural_floor for neural expert
+            nf = self.mixer_neural_floor
+            neural_w = nf + (1.0 - nf) * weights[:, :1]
+            other_w = (1.0 - nf) * weights[:, 1:]
+            weights = torch.cat([neural_w, other_w], dim=1)
+            mixed_p = (weights * expert_p.clamp(min=1e-12)).sum(dim=1)
+            mixer_loss = -torch.log(mixed_p.clamp(min=1e-12)).mean()
+            main_loss = main_loss + self.mixer_loss_weight * mixer_loss
         return main_loss
     def forward_logits(self, input_ids: Tensor) -> Tensor:
         """Return logits (bsz, seq_len, vocab) without computing loss."""
@@ -919,6 +1221,38 @@ class GPT(nn.Module):
             corr_proj = self.f1_corr_out(corr_hidden)
             logits_proj = logits_proj + self.f1_corr_scale.to(dtype=logits_proj.dtype) * corr_proj
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+    def forward_logits_and_alpha(self, input_ids: Tensor) -> tuple[Tensor, Tensor | None]:
+        """Return (logits, alpha_raw) — alpha_raw is gate logits for mixer head."""
+        x = self.tok_emb(input_ids)
+        if self.bigram is not None:
+            x = x + self.bigram(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x = self.smear(x)
+        x0 = x
+        skips: list[Tensor] = []
+        ve_cache: dict = {}
+        for i in range(self.num_encoder_layers):
+            ve = self._get_ve(i, input_ids, ve_cache)
+            x = self.blocks[i](x, x0, v_embed=ve)
+            skips.append(x)
+        for i in range(self.num_decoder_layers):
+            bi = self.num_encoder_layers + i
+            if skips:
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+            ve = self._get_ve(bi, input_ids, ve_cache)
+            x = self.blocks[bi](x, x0, v_embed=ve)
+        x = self.final_norm(x)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            logits_proj = self.lm_head(x)
+        if self.f1_corr_in is not None and self.f1_corr_out is not None and self.f1_corr_scale is not None:
+            corr_hidden = F.silu(self.f1_corr_in(x))
+            corr_proj = self.f1_corr_out(corr_hidden)
+            logits_proj = logits_proj + self.f1_corr_scale.to(dtype=logits_proj.dtype) * corr_proj
+        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        alpha_raw = self.alpha_head(x.float()) if self.alpha_head is not None else None
+        return logits, alpha_raw
 def eval_val_sliding(
     args: Hyperparameters,
     base_model: nn.Module,
@@ -1040,13 +1374,28 @@ def eval_val_sliding_hashed_ngram(
     adaptive = args.ngram_eval_adaptive
     alpha_min = args.ngram_eval_alpha_min
     alpha_max = args.ngram_eval_alpha_max
+    alpha_clip = args.ngram_eval_alpha_clip
     ent_center = args.ngram_eval_entropy_center
     ent_scale = args.ngram_eval_entropy_scale
+    logit_mix = args.ngram_logit_mix
+    logit_mix_eps = max(args.ngram_logit_mix_eps, 1e-12)
+    fixed_share_gamma = float(np.clip(args.ngram_fixed_share_gamma, 0.0, 1.0))
+    fixed_share_eta = max(args.ngram_fixed_share_eta, 0.0)
+    fixed_share_min_chunk_tokens = max(args.ngram_fixed_share_min_chunk_tokens, 1)
 
     # Parse fixed per-order multipliers (PR #809 style)
-    _fixed_order_mults = None
+    n_orders = max_order - min_order + 1
+    _fixed_order_mults = np.ones((n_orders,), dtype=np.float64)
+    _has_fixed_order_mults = False
     if args.ngram_order_mults_str:
-        _fixed_order_mults = np.array([float(x) for x in args.ngram_order_mults_str.split(",")], dtype=np.float64)
+        raw_mults = np.array(
+            [float(x.strip()) for x in args.ngram_order_mults_str.split(",") if x.strip()],
+            dtype=np.float64,
+        )
+        if raw_mults.size > 0:
+            _has_fixed_order_mults = True
+            use_n = min(raw_mults.size, n_orders)
+            _fixed_order_mults[:use_n] = raw_mults[:use_n]
 
     seq_len = eval_seq_len or args.train_seq_len
     total_tokens = val_tokens.numel() - 1
@@ -1076,12 +1425,7 @@ def eval_val_sliding_hashed_ngram(
     ctx_tables = {n: np.zeros((buckets,), dtype=np.uint32) for n in range(min_order, max_order + 1)}
     full_tables = {n: np.zeros((buckets,), dtype=np.uint32) for n in range(min_order, max_order + 1)}
     mask = np.uint64(buckets - 1)
-    primes = np.array(
-        [np.uint64(36313), np.uint64(27191), np.uint64(51647), np.uint64(81929),
-         np.uint64(131071), np.uint64(174763), np.uint64(233017), np.uint64(283721),
-         np.uint64(347237)],
-        dtype=np.uint64,
-    )
+    primes = NGRAM_PRIMES
 
     loss_sum = 0.0
     token_count = 0.0
@@ -1103,6 +1447,12 @@ def eval_val_sliding_hashed_ngram(
         _c_beats = {n: [0] * _TOTAL_CELLS for n in range(min_order, max_order + 1)}
 
     base_model.eval()
+    _has_learned_alpha_head = (hasattr(base_model, 'alpha_head') and base_model.alpha_head is not None)
+    _use_learned_alpha = _has_learned_alpha_head and args.ngram_use_learned_alpha
+    _use_fixed_share = (not _use_learned_alpha) and (fixed_share_gamma > 0.0) and (fixed_share_eta > 0.0) and (n_orders > 1)
+    _fixed_share_w = np.full((n_orders,), 1.0 / n_orders, dtype=np.float64)
+    if _use_learned_alpha:
+        _compiled_la = maybe_torch_compile(base_model.forward_logits_and_alpha, args)
     compiled_logits = maybe_torch_compile(base_model.forward_logits, args)
     t0 = time.perf_counter()
     deadline = (t0 + max_seconds) if max_seconds > 0.0 else None
@@ -1111,6 +1461,26 @@ def eval_val_sliding_hashed_ngram(
     if rank == 0:
         print(f"ngram_eval:chunks={num_chunks} chunk_tokens={chunk_tokens} "
               f"windows={len(all_window_starts)} shared_tables=True", flush=True)
+        blend_mode = "learned_alpha" if _use_learned_alpha else "classic_alpha"
+        mult_desc = ",".join(f"{m:.2f}" for m in _fixed_order_mults) if _has_fixed_order_mults else "none"
+        print(
+            f"ngram_eval:blend_mode={blend_mode} adaptive={int(adaptive)} "
+            f"alpha=[{alpha_min:.2f},{alpha_max:.2f}] clip={alpha_clip:.2f} "
+            f"logit_mix={int(logit_mix)} "
+            f"entropy_shift={int(args.ngram_entropy_shift)} shift_per_order={args.ngram_entropy_shift_per_order:.2f} "
+            f"order_mults={mult_desc}",
+            flush=True,
+        )
+        if _use_fixed_share:
+            print(
+                f"ngram_eval:fixed_share enabled=1 gamma={fixed_share_gamma:.4f} "
+                f"eta={fixed_share_eta:.4f} min_chunk_tokens={fixed_share_min_chunk_tokens}",
+                flush=True,
+            )
+        if _has_learned_alpha_head and not _use_learned_alpha:
+            print("ngram_eval:learned_alpha_head_present but disabled by NGRAM_USE_LEARNED_ALPHA=0", flush=True)
+        if _use_learned_alpha and args.ngram_entropy_shift:
+            print("ngram_eval:note NGRAM_ENTROPY_SHIFT is ignored in learned_alpha mode", flush=True)
 
     with torch.inference_mode():
         for ci in range(num_chunks):
@@ -1143,7 +1513,11 @@ def eval_val_sliding_hashed_ngram(
                     y_batch[i, :wlen] = chunk[1:]
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits = compiled_logits(x_batch)
+                    if _use_learned_alpha:
+                        logits, alpha_raw_batch = _compiled_la(x_batch)
+                    else:
+                        logits = compiled_logits(x_batch)
+                        alpha_raw_batch = None
                 logits_f = logits.float()
                 nll = F.cross_entropy(
                     logits_f.reshape(-1, logits_f.size(-1)),
@@ -1161,57 +1535,202 @@ def eval_val_sliding_hashed_ngram(
                     seg_nll = nll[i, s:wlen].to(torch.float64).cpu().numpy()
                     seg_model_p = np.exp(-seg_nll)
 
-                    if adaptive:
-                        log_probs = F.log_softmax(logits_f[i, s:wlen], dim=-1)
-                        probs_a = log_probs.exp()
-                        entropy = -(probs_a * log_probs).sum(dim=-1).cpu().numpy()
-                        sig = 1.0 / (1.0 + np.exp(-ent_scale * (entropy - ent_center)))
-                        per_token_alpha = alpha_min + (alpha_max - alpha_min) * sig
-                        # Bin entropy for 2D cubric: 0=low, 1=mid, 2=high
-                        _ent_bins = np.digitize(entropy, _ENT_EDGES).astype(np.int32)
-                    else:
-                        per_token_alpha = np.full(seg_len, alpha)
-                        _ent_bins = np.ones(seg_len, dtype=np.int32)  # all mid
+                    entropy = None
+                    if not _use_learned_alpha:
+                        if adaptive:
+                            log_probs = F.log_softmax(logits_f[i, s:wlen], dim=-1)
+                            probs_a = log_probs.exp()
+                            entropy = -(probs_a * log_probs).sum(dim=-1).cpu().numpy()
+                            sig = 1.0 / (1.0 + np.exp(-ent_scale * (entropy - ent_center)))
+                            per_token_alpha = alpha_min + (alpha_max - alpha_min) * sig
+                            # Bin entropy for 2D cubric: 0=low, 1=mid, 2=high
+                            _ent_bins = np.digitize(entropy, _ENT_EDGES).astype(np.int32)
+                        else:
+                            per_token_alpha = np.full(seg_len, alpha, dtype=np.float64)
+                            _ent_bins = np.ones(seg_len, dtype=np.int32)  # all mid
 
                     global_j = np.arange(ws + s + 1, ws + wlen + 1, dtype=np.int64)
-                    p_ng = np.zeros(seg_len, dtype=np.float64)
-                    ng_matched = np.zeros(seg_len, dtype=np.bool_)
-                    _ng_ord = np.zeros(seg_len, dtype=np.int32)
-                    _ng_ctx_count = np.zeros(seg_len, dtype=np.float64)
                     tgt_np = val_np[global_j].astype(np.uint64)
 
-                    for n in range(max_order, min_order - 1, -1):
-                        ctx_width = n - 1
-                        valid = (global_j >= ctx_width) & (~ng_matched)
-                        if not valid.any():
-                            continue
-                        v_idx = np.nonzero(valid)[0]
-                        jv = global_j[v_idx]
-                        ctx_hash = np.zeros(len(jv), dtype=np.uint64)
-                        for k in range(ctx_width):
-                            tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
-                            ctx_hash ^= tok * primes[k % len(primes)]
-                        ctx_key = (ctx_hash & mask).astype(np.int64)
-                        full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
-                        ctx_counts = ctx_tables[n][ctx_key].astype(np.float64)
-                        full_counts = full_tables[n][full_key].astype(np.float64)
-                        has_data = ctx_counts >= float(min_count)
-                        if has_data.any():
-                            p = np.minimum(full_counts, ctx_counts) / np.maximum(ctx_counts, 1.0)
-                            p = np.clip(p, 0.0, 1.0)
-                            hit_idx = v_idx[has_data]
-                            p_ng[hit_idx] = p[has_data]
-                            ng_matched[hit_idx] = True
-                            _ng_ord[hit_idx] = n
-                            _ng_ctx_count[hit_idx] = ctx_counts[has_data]
-
-                    # Legal entropy-adaptive alpha: mix using model entropy only (no label access)
-                    if ng_matched.any():
-                        m_idx = np.nonzero(ng_matched)[0]
-                        mp = seg_model_p[m_idx]
-                        np_val = p_ng[m_idx]
-                        a = per_token_alpha[m_idx]
-                        seg_model_p[m_idx] = (1.0 - a) * mp + a * np_val
+                    if _use_learned_alpha:
+                        # Learned mixer: get per-order probs and blend with learned weights
+                        order_p = np.full((seg_len, n_orders), 1.0 / 1024.0, dtype=np.float64)
+                        order_valid = np.zeros((seg_len, n_orders), dtype=np.bool_)
+                        for oi, n in enumerate(range(min_order, max_order + 1)):
+                            ctx_width = n - 1
+                            valid = global_j >= ctx_width
+                            if not valid.any():
+                                continue
+                            v_idx = np.nonzero(valid)[0]
+                            jv = global_j[v_idx]
+                            ctx_hash = np.zeros(len(jv), dtype=np.uint64)
+                            for k in range(ctx_width):
+                                tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
+                                ctx_hash ^= tok * primes[k % len(primes)]
+                            ctx_key = (ctx_hash & mask).astype(np.int64)
+                            full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
+                            ctx_c = ctx_tables[n][ctx_key].astype(np.float64)
+                            full_c = full_tables[n][full_key].astype(np.float64)
+                            has_data = ctx_c >= float(min_count)
+                            if has_data.any():
+                                p = np.minimum(full_c[has_data], ctx_c[has_data]) / np.maximum(ctx_c[has_data], 1.0)
+                                hit_idx = v_idx[has_data]
+                                order_p[hit_idx, oi] = np.clip(p, 0.0, 1.0)
+                                order_valid[hit_idx, oi] = True
+                        # Build expert_p: [neural_p, order2_p, ..., orderN_p]
+                        expert_p = np.concatenate([seg_model_p[:, None], order_p], axis=1)  # (seg_len, 1+n_orders)
+                        # Get learned alpha weights for this segment
+                        seg_alpha = alpha_raw_batch[i, s:wlen].float().cpu().numpy()  # (seg_len, n_experts)
+                        # Masked softmax
+                        full_mask = np.concatenate([
+                            np.ones((seg_len, 1), dtype=np.bool_),
+                            order_valid,
+                        ], axis=1)
+                        seg_alpha_masked = np.where(full_mask, seg_alpha, -1e9)
+                        # Softmax
+                        seg_alpha_masked -= seg_alpha_masked.max(axis=1, keepdims=True)
+                        exp_a = np.exp(seg_alpha_masked)
+                        weights = exp_a / exp_a.sum(axis=1, keepdims=True)
+                        if _has_fixed_order_mults:
+                            weights[:, 1:] *= _fixed_order_mults[None, :]
+                        # Neural floor
+                        nf = getattr(base_model, 'mixer_neural_floor', 0.05)
+                        weights[:, 0] = nf + (1.0 - nf) * weights[:, 0]
+                        weights[:, 1:] = (1.0 - nf) * weights[:, 1:]
+                        # Renormalize
+                        weights /= weights.sum(axis=1, keepdims=True)
+                        # Blend
+                        seg_model_p = np.clip((weights * expert_p).sum(axis=1), 1e-12, 1.0)
+                    else:
+                        # Classic legal blending path:
+                        # either highest-order backoff or fixed-share over all orders.
+                        p_ng = np.zeros(seg_len, dtype=np.float64)
+                        ng_matched = np.zeros(seg_len, dtype=np.bool_)
+                        _ord_eff = np.full(seg_len, float(min_order), dtype=np.float64)
+                        _ord_mult_eff = np.ones(seg_len, dtype=np.float64)
+                        if _use_fixed_share:
+                            order_p = np.full((seg_len, n_orders), 1.0 / 1024.0, dtype=np.float64)
+                            order_valid = np.zeros((seg_len, n_orders), dtype=np.bool_)
+                            for oi, n in enumerate(range(min_order, max_order + 1)):
+                                ctx_width = n - 1
+                                valid = global_j >= ctx_width
+                                if not valid.any():
+                                    continue
+                                v_idx = np.nonzero(valid)[0]
+                                jv = global_j[v_idx]
+                                ctx_hash = np.zeros(len(jv), dtype=np.uint64)
+                                for k in range(ctx_width):
+                                    tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
+                                    ctx_hash ^= tok * primes[k % len(primes)]
+                                ctx_key = (ctx_hash & mask).astype(np.int64)
+                                full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
+                                ctx_counts = ctx_tables[n][ctx_key].astype(np.float64)
+                                full_counts = full_tables[n][full_key].astype(np.float64)
+                                has_data = ctx_counts >= float(min_count)
+                                if has_data.any():
+                                    p = np.minimum(full_counts[has_data], ctx_counts[has_data]) / np.maximum(ctx_counts[has_data], 1.0)
+                                    p = np.clip(p, 0.0, 1.0)
+                                    hit_idx = v_idx[has_data]
+                                    order_p[hit_idx, oi] = p
+                                    order_valid[hit_idx, oi] = True
+                            weighted = order_valid.astype(np.float64) * _fixed_share_w[None, :]
+                            row_sum = weighted.sum(axis=1)
+                            ng_matched = row_sum > 0.0
+                            if ng_matched.any():
+                                m_idx = np.nonzero(ng_matched)[0]
+                                w_norm = weighted[m_idx] / row_sum[m_idx, None]
+                                p_ng[m_idx] = (w_norm * order_p[m_idx]).sum(axis=1)
+                                order_vals = np.arange(min_order, max_order + 1, dtype=np.float64)
+                                _ord_eff[m_idx] = (w_norm * order_vals[None, :]).sum(axis=1)
+                                if _has_fixed_order_mults:
+                                    _ord_mult_eff[m_idx] = (w_norm * _fixed_order_mults[None, :]).sum(axis=1)
+                                # Fixed-Share Hedge update for future tokens/chunks only.
+                                if m_idx.size >= fixed_share_min_chunk_tokens:
+                                    loss_mat = -np.log(np.clip(order_p[m_idx], 1e-12, 1.0))
+                                    valid_mat = order_valid[m_idx]
+                                    valid_counts = valid_mat.sum(axis=0).astype(np.float64)
+                                    if (valid_counts > 0).any():
+                                        expert_losses = np.where(
+                                            valid_counts > 0,
+                                            (loss_mat * valid_mat).sum(axis=0) / np.maximum(valid_counts, 1.0),
+                                            0.0,
+                                        )
+                                        fallback = float(expert_losses[valid_counts > 0].max())
+                                        expert_losses = np.where(valid_counts > 0, expert_losses, fallback)
+                                        expert_losses = np.clip(expert_losses, 0.0, 50.0)
+                                        _fixed_share_w *= np.exp(-fixed_share_eta * expert_losses)
+                                        ws = _fixed_share_w.sum()
+                                        if not np.isfinite(ws) or ws <= 0.0:
+                                            _fixed_share_w.fill(1.0 / n_orders)
+                                        else:
+                                            _fixed_share_w /= ws
+                                        _fixed_share_w = ((1.0 - fixed_share_gamma) * _fixed_share_w) + (fixed_share_gamma / n_orders)
+                                        _fixed_share_w /= _fixed_share_w.sum()
+                        else:
+                            _ng_ord = np.zeros(seg_len, dtype=np.int32)
+                            for n in range(max_order, min_order - 1, -1):
+                                ctx_width = n - 1
+                                valid = (global_j >= ctx_width) & (~ng_matched)
+                                if not valid.any():
+                                    continue
+                                v_idx = np.nonzero(valid)[0]
+                                jv = global_j[v_idx]
+                                ctx_hash = np.zeros(len(jv), dtype=np.uint64)
+                                for k in range(ctx_width):
+                                    tok = val_np[jv - (ctx_width - k)].astype(np.uint64)
+                                    ctx_hash ^= tok * primes[k % len(primes)]
+                                ctx_key = (ctx_hash & mask).astype(np.int64)
+                                full_key = ((ctx_hash ^ (tgt_np[v_idx] * primes[ctx_width % len(primes)])) & mask).astype(np.int64)
+                                ctx_counts = ctx_tables[n][ctx_key].astype(np.float64)
+                                full_counts = full_tables[n][full_key].astype(np.float64)
+                                has_data = ctx_counts >= float(min_count)
+                                if has_data.any():
+                                    p = np.minimum(full_counts, ctx_counts) / np.maximum(ctx_counts, 1.0)
+                                    p = np.clip(p, 0.0, 1.0)
+                                    hit_idx = v_idx[has_data]
+                                    p_ng[hit_idx] = p[has_data]
+                                    ng_matched[hit_idx] = True
+                                    _ng_ord[hit_idx] = n
+                            if ng_matched.any():
+                                _ord_eff[ng_matched] = _ng_ord[ng_matched].astype(np.float64)
+                                if _has_fixed_order_mults:
+                                    ord_idx = np.clip(_ng_ord[ng_matched] - min_order, 0, n_orders - 1)
+                                    _ord_mult_eff[ng_matched] = _fixed_order_mults[ord_idx]
+                        # Deterministic alpha blend (no oracle look-ahead):
+                        # entropy-adaptive alpha, optional per-order center shift,
+                        # optional fixed per-order multipliers, then clip.
+                        if ng_matched.any():
+                            m_idx = np.nonzero(ng_matched)[0]
+                            mp = seg_model_p[m_idx]
+                            np_val = p_ng[m_idx]
+                            if adaptive:
+                                if entropy is None:
+                                    raise RuntimeError("entropy must be computed when adaptive ngram eval is enabled")
+                                ent = entropy[m_idx]
+                                if args.ngram_entropy_shift:
+                                    centers = (
+                                        ent_center
+                                        - args.ngram_entropy_shift_per_order
+                                        * (_ord_eff[m_idx] - float(min_order))
+                                    )
+                                else:
+                                    centers = np.full_like(ent, ent_center, dtype=np.float64)
+                                sig = 1.0 / (1.0 + np.exp(-ent_scale * (ent - centers)))
+                                a = alpha_min + (alpha_max - alpha_min) * sig
+                            else:
+                                a = per_token_alpha[m_idx]
+                            if _has_fixed_order_mults:
+                                a = a * _ord_mult_eff[m_idx]
+                            a = np.clip(a, 0.0, alpha_clip)
+                            if logit_mix:
+                                mp_c = np.clip(mp, logit_mix_eps, 1.0 - logit_mix_eps)
+                                np_c = np.clip(np_val, logit_mix_eps, 1.0 - logit_mix_eps)
+                                ml = np.log(mp_c) - np.log1p(-mp_c)
+                                nl = np.log(np_c) - np.log1p(-np_c)
+                                z = np.clip((1.0 - a) * ml + a * nl, -40.0, 40.0)
+                                seg_model_p[m_idx] = 1.0 / (1.0 + np.exp(-z))
+                            else:
+                                seg_model_p[m_idx] = (1.0 - a) * mp + a * np_val
 
                     seg_nll = -np.log(np.clip(seg_model_p, 1e-12, 1.0))
                     loss_sum += float(seg_nll.sum())
@@ -1262,8 +1781,13 @@ def eval_val_sliding_hashed_ngram(
             if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1 or ci < 3):
                 elapsed = time.perf_counter() - t0
                 cur_bpb = (loss_sum / max(token_count, 1.0)) / math.log(2.0) * (token_count / max(byte_count, 1.0)) if token_count > 0 else 0.0
+                fs_suffix = ""
+                if _use_fixed_share:
+                    top_i = int(np.argmax(_fixed_share_w))
+                    top_order = min_order + top_i
+                    fs_suffix = f" fs_top=o{top_order} w={_fixed_share_w[top_i]:.3f}"
                 print(
-                    f"ngram_eval:chunk [{ci+1}/{num_chunks}] bpb={cur_bpb:.6f} t={elapsed:.0f}s",
+                    f"ngram_eval:chunk [{ci+1}/{num_chunks}] bpb={cur_bpb:.6f} t={elapsed:.0f}s{fs_suffix}",
                     flush=True,
                 )
 
@@ -1294,6 +1818,9 @@ def eval_val_sliding_hashed_ngram(
             m = _c_alpha_mult[n]
             row = " ".join(f"{m[cell]:.2f}" for cell in range(_TOTAL_CELLS))
             print(f"  o{n}: [{row}]", flush=True)
+    if _use_fixed_share and rank == 0:
+        parts = [f"o{min_order + i}:{w:.3f}" for i, w in enumerate(_fixed_share_w)]
+        print(f"ngram_eval:fixed_share_final {' '.join(parts)}", flush=True)
     val_loss = loss_sum / max(token_count, 1.0)
     val_bpb = val_loss / math.log(2.0) * (token_count / max(byte_count, 1.0))
     base_model.train()
@@ -1331,7 +1858,7 @@ def _find_best_row_scales(W: Tensor, clip_range: int = 31) -> Tensor:
         best_err[improved] = err[improved]
     return best_s
 def gptq_quantize_weight(W: Tensor, H: Tensor, clip_range: int = 31,
-                          block_size: int = 128, percdamp: float = 0.01) -> tuple[Tensor, Tensor]:
+                          block_size: int = 64, percdamp: float = 0.002) -> tuple[Tensor, Tensor]:
     """GPTQ: quantize weight matrix W using Hessian H = X^T X for error compensation.
     Uses pre-computed per-row scales and column reordering by Hessian diagonal.
     Returns (quantized_int8, scale_fp16) in int6 range [-clip_range, clip_range]."""
@@ -1342,8 +1869,8 @@ def gptq_quantize_weight(W: Tensor, H: Tensor, clip_range: int = 31,
     H = H.float().clone()
     damp = percdamp * H.diag().mean()
     H.diagonal().add_(damp)
-    # Column reordering: process most-important columns first (descending H_diag)
-    perm = torch.argsort(H.diag(), descending=True)
+    # Column reordering: process least-important columns first (ascending H_diag)
+    perm = torch.argsort(H.diag())
     invperm = torch.argsort(perm)
     W = W[:, perm]
     H = H[perm][:, perm]
@@ -1595,6 +2122,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    mixer_n_experts = (1 + args.mixer_n_orders) if args.mixer_enabled else 0
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1622,6 +2150,9 @@ def main() -> None:
         mlp_leaky_slope=args.mlp_leaky_slope,
         f1_corr_rank=args.f1_corr_rank,
         f1_corr_scale_init=args.f1_corr_scale_init,
+        mixer_n_experts=mixer_n_experts,
+        mixer_loss_weight=args.mixer_loss_weight,
+        mixer_neural_floor=args.mixer_neural_floor,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1630,11 +2161,124 @@ def main() -> None:
     # Complementary training: downweight tokens predictable by bigrams
     complement_alpha = float(os.environ.get("COMPLEMENT_ALPHA", "0"))
     if complement_alpha > 0:
-        tracker = TrainNgramTracker(args.vocab_size, device, complement_alpha=complement_alpha)
+        tracker = TrainNgramTracker(
+            args.vocab_size,
+            device,
+            complement_alpha=complement_alpha,
+            noise_floor=args.complement_noise_floor,
+            noise_weight=args.complement_noise_weight,
+        )
         base_model._ngram_tracker = tracker
-        log0(f"complementary_training:alpha={complement_alpha}")
+        log0(
+            f"complementary_training:alpha={complement_alpha} "
+            f"noise_floor={args.complement_noise_floor} noise_weight={args.complement_noise_weight}"
+        )
     else:
         base_model._ngram_tracker = None
+    # Learned mixer: prefill training-data n-gram oracle
+    train_mixer: TrainNgramOracle | TrainNgramOracleGPU | None = None
+    if args.mixer_enabled:
+        mixer_max_order = args.ngram_eval_min_order + args.mixer_n_orders - 1
+        use_gpu_mixer = args.mixer_gpu_mode and device.type == "cuda"
+        if use_gpu_mixer:
+            train_mixer = TrainNgramOracleGPU(
+                buckets=args.mixer_buckets,
+                min_order=args.ngram_eval_min_order,
+                max_order=mixer_max_order,
+                min_count=args.ngram_eval_min_count,
+                device=device,
+                pos_chunk=args.mixer_prefill_pos_chunk,
+            )
+        else:
+            train_mixer = TrainNgramOracle(
+                buckets=args.mixer_buckets,
+                min_order=args.ngram_eval_min_order,
+                max_order=mixer_max_order,
+                min_count=args.ngram_eval_min_count,
+            )
+        train_files = sorted(glob.glob(args.train_files))[:args.mixer_prefill_max_shards]
+        prefill_cap_s = max(0.0, args.mixer_prefill_max_seconds)
+        prefill_min_shards = max(1, args.mixer_prefill_min_shards)
+        tokens_per_shard = max(0, args.mixer_prefill_tokens_per_shard)
+        if distributed and use_gpu_mixer:
+            prefill_mode = "sharded+allreduce-gpu"
+        elif distributed:
+            prefill_mode = "rank0+broadcast"
+        else:
+            prefill_mode = "single-rank"
+        log0(
+            "mixer:prefill "
+            f"mode={prefill_mode} shards<= {len(train_files)} tokens_per_shard={tokens_per_shard or 'full'} "
+            f"orders={args.ngram_eval_min_order}..{mixer_max_order} buckets={args.mixer_buckets} "
+            f"max_seconds={prefill_cap_s if prefill_cap_s > 0 else 'unlimited'}"
+        )
+
+        if distributed and use_gpu_mixer:
+            my_train_files = train_files[rank::world_size]
+        elif distributed:
+            my_train_files = train_files if rank == 0 else []
+        else:
+            my_train_files = train_files
+
+        local_prefilled_shards = 0
+        local_prefill_s = 0.0
+        t_prefill = time.perf_counter()
+        for fi, f in enumerate(my_train_files):
+            train_mixer.prefill_shard(f, max_tokens=tokens_per_shard)
+            local_prefilled_shards += 1
+            if (fi + 1) % 5 == 0 or fi == 0 or fi + 1 == len(my_train_files):
+                elapsed = time.perf_counter() - t_prefill
+                toks_per_s = train_mixer.total_tokens / max(elapsed, 1e-9)
+                if rank == 0:
+                    print(
+                        f"  mixer:prefill rank={rank} {fi+1}/{len(my_train_files)} shards, "
+                        f"{train_mixer.total_tokens:,} tokens, {toks_per_s/1e6:.2f}M tok/s",
+                        flush=True,
+                    )
+            if prefill_cap_s > 0.0 and local_prefilled_shards >= prefill_min_shards:
+                elapsed = time.perf_counter() - t_prefill
+                if elapsed >= prefill_cap_s:
+                    if rank == 0:
+                        print(
+                            f"  mixer:prefill cutoff rank={rank} at {local_prefilled_shards} shards "
+                            f"after {elapsed:.1f}s (cap={prefill_cap_s:.1f}s)",
+                            flush=True,
+                        )
+                    break
+        local_prefill_s = time.perf_counter() - t_prefill
+
+        if distributed:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            t_sync = time.perf_counter()
+            if use_gpu_mixer:
+                all_reduce_train_mixer_tables_gpu(train_mixer, device)
+            else:
+                broadcast_train_mixer_tables(train_mixer, rank, device)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            sync_s = time.perf_counter() - t_sync
+
+            shards_t = torch.tensor([local_prefilled_shards], device=device, dtype=torch.int64)
+            prefill_s_t = torch.tensor([local_prefill_s], device=device, dtype=torch.float64)
+            if use_gpu_mixer:
+                dist.all_reduce(shards_t, op=dist.ReduceOp.SUM)
+                dist.all_reduce(prefill_s_t, op=dist.ReduceOp.MAX)
+            else:
+                dist.broadcast(shards_t, src=0)
+                dist.broadcast(prefill_s_t, src=0)
+            total_prefilled_shards = int(shards_t.item())
+            prefill_s = float(prefill_s_t.item())
+            log0(
+                f"mixer:prefilled {train_mixer.total_tokens:,} tokens from {total_prefilled_shards} shards "
+                f"in {prefill_s:.1f}s, sync:{sync_s:.1f}s mode={prefill_mode}"
+            )
+        else:
+            prefill_s = local_prefill_s
+            log0(
+                f"mixer:prefilled {train_mixer.total_tokens:,} tokens from {local_prefilled_shards} shards "
+                f"in {prefill_s:.1f}s mode={prefill_mode}"
+            )
     compiled_model = maybe_torch_compile(base_model, args)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
     block_named_params = list(base_model.blocks.named_parameters())
@@ -1660,6 +2304,8 @@ def main() -> None:
         scalar_params.append(base_model.bigram.scale)
     if base_model.f1_corr_scale is not None:
         scalar_params.append(base_model.f1_corr_scale)
+    if base_model.alpha_head is not None:
+        scalar_params.extend(list(base_model.alpha_head.parameters()))
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     tok_params = [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}]
     if base_model.bigram is not None:
@@ -1732,9 +2378,25 @@ def main() -> None:
     log0(f"compile:enabled={int(args.compile_enabled)} fullgraph={int(args.compile_fullgraph)}")
     log0(f"seed:{args.seed}")
     if args.ngram_eval_order >= 2:
+        order_mults_enabled = bool(args.ngram_order_mults_str.strip())
         log0(
-            f"ngram_eval:order={args.ngram_eval_order} alpha={args.ngram_eval_alpha} "
-            f"min_count={args.ngram_eval_min_count} buckets={args.ngram_eval_buckets}"
+            f"ngram_eval:order={args.ngram_eval_order} min_count={args.ngram_eval_min_count} "
+            f"buckets={args.ngram_eval_buckets} use_learned_alpha={int(args.ngram_use_learned_alpha)} "
+            f"adaptive={int(args.ngram_eval_adaptive)} alpha={args.ngram_eval_alpha} "
+            f"alpha_min={args.ngram_eval_alpha_min} alpha_max={args.ngram_eval_alpha_max} "
+            f"alpha_clip={args.ngram_eval_alpha_clip} logit_mix={int(args.ngram_logit_mix)}"
+        )
+        log0(
+            f"ngram_eval:entropy_center={args.ngram_eval_entropy_center} "
+            f"entropy_scale={args.ngram_eval_entropy_scale} "
+            f"entropy_shift={int(args.ngram_entropy_shift)} "
+            f"entropy_shift_per_order={args.ngram_entropy_shift_per_order} "
+            f"order_mults={'set' if order_mults_enabled else 'none'}"
+        )
+        log0(
+            f"ngram_eval:fixed_share_gamma={args.ngram_fixed_share_gamma} "
+            f"fixed_share_eta={args.ngram_fixed_share_eta} "
+            f"fixed_share_min_chunk_tokens={args.ngram_fixed_share_min_chunk_tokens}"
         )
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
     def zero_grad_all() -> None:
@@ -1761,8 +2423,13 @@ def main() -> None:
                 if distributed:
                     model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                _mx_p, _mx_v = None, None
+                if train_mixer is not None:
+                    _mx_p_raw, _mx_v_raw = train_mixer.get_ngram_probs(x, y)
+                    _mx_p = _mx_p_raw.to(device=device, dtype=torch.bfloat16, non_blocking=True)
+                    _mx_v = _mx_v_raw.to(device=device, non_blocking=True)
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                    warmup_loss = model(x, y)
+                    warmup_loss = model(x, y, ngram_expert_p=_mx_p, ngram_valid_mask=_mx_v)
                 (warmup_loss * grad_scale).backward()
             for opt in optimizers:
                 opt.step()
@@ -1827,8 +2494,14 @@ def main() -> None:
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+            # Mixer: get n-gram probs from training oracle (CPU or GPU path).
+            _mx_p, _mx_v = None, None
+            if train_mixer is not None:
+                _mx_p_raw, _mx_v_raw = train_mixer.get_ngram_probs(x, y)
+                _mx_p = _mx_p_raw.to(device=device, dtype=torch.bfloat16, non_blocking=True)
+                _mx_v = _mx_v_raw.to(device=device, non_blocking=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = model(x, y)
+                loss = model(x, y, ngram_expert_p=_mx_p, ngram_valid_mask=_mx_v)
             train_loss += loss.detach()
             loss.backward()
             if base_model._ngram_tracker is not None:
@@ -1991,114 +2664,10 @@ def main() -> None:
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     # GPTQ quantization using Hessians collected during training phase (no training data access here)
     quant_result, quant_meta = mixed_quantize_int6_gptq(sd_cpu, {"mlp", "attn", "aux"}, gptq_hessians)
-
-    def _serialize_quant(qr, qm):
-        buf = io.BytesIO()
-        torch.save({"w": qr, "m": qm}, buf)
-        return buf.getvalue()
-
-    def _compress_final(raw):
-        if _COMPRESSOR == "lzma":
-            return lzma.compress(raw, preset=6)
-        elif _COMPRESSOR == "zstd":
-            return zstandard.ZstdCompressor(level=22).compress(raw)
-        else:
-            return zlib.compress(raw, 9)
-
-    def _compress_fast(raw):
-        """Fast zstd-1 for size estimation during binary search."""
-        try:
-            return zstandard.ZstdCompressor(level=1).compress(raw)
-        except Exception:
-            return zlib.compress(raw, 1)
-
-    # Selective ±1 magnitude pruning: zero lowest-impact ±1 values to fit target size
-    TARGET_MB = float(os.environ.get("TARGET_MB", "15.9"))
-    target_bytes = int(TARGET_MB * 1_000_000)
-    code_bytes_est = len(code.encode("utf-8"))
-
-    quant_raw = _serialize_quant(quant_result, quant_meta)
-    quant_blob = _compress_final(quant_raw)
-    total_size = len(quant_blob) + code_bytes_est
-
-    if total_size > target_bytes:
-        log0(f"prune: artifact {total_size} bytes > target {target_bytes}, starting selective ±1 pruning...")
-        # Collect all ±1 values vectorized — no Python per-element loop
-        all_keys = []
-        all_flat_idx = []
-        all_errors = []
-        for key, tensor in quant_result.items():
-            if not key.endswith(".q"):
-                continue
-            scale_key = key.replace(".q", ".scale")
-            if scale_key not in quant_result:
-                continue
-            q = tensor
-            s = quant_result[scale_key].float()
-            mask_pm1 = (q == 1) | (q == -1)
-            if not mask_pm1.any():
-                continue
-            flat_idx = torch.nonzero(mask_pm1.view(-1), as_tuple=False).squeeze(1)
-            if q.ndim == 2:
-                row_idx = flat_idx // q.shape[1]
-                errors = s[row_idx] ** 2
-            else:
-                errors = s.expand_as(q).reshape(-1)[flat_idx] ** 2
-            all_keys.extend([key] * len(flat_idx))
-            all_flat_idx.append(flat_idx)
-            all_errors.append(errors)
-
-        all_flat_idx = torch.cat(all_flat_idx)
-        all_errors = torch.cat(all_errors)
-        # Sort by error ascending (least impactful first)
-        sort_order = torch.argsort(all_errors)
-        all_flat_idx = all_flat_idx[sort_order]
-        all_errors = all_errors[sort_order]
-        sorted_keys = [all_keys[i] for i in sort_order.tolist()]
-        log0(f"prune: {len(sorted_keys)} candidate ±1 values")
-
-        # Calibrate: get fast-compress ratio vs final-compress ratio
-        fast_size = len(_compress_fast(quant_raw))
-        ratio = total_size / max(fast_size, 1)  # lzma/zstd ratio
-        adjusted_target = int(target_bytes / ratio)  # target in fast-compress space
-        log0(f"prune: calibrated ratio={ratio:.4f} fast={fast_size} adjusted_target={adjusted_target}")
-
-        # Binary search using fast compression for speed
-        lo, hi = 0, len(sorted_keys)
-        best_n = hi
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            qr_test = {k: v.clone() for k, v in quant_result.items()}
-            for i in range(mid):
-                qr_test[sorted_keys[i]].view(-1)[all_flat_idx[i]] = 0
-            raw_test = _serialize_quant(qr_test, quant_meta)
-            test_size = len(_compress_fast(raw_test)) + code_bytes_est
-            if test_size <= adjusted_target:
-                best_n = mid
-                hi = mid - 1
-            else:
-                lo = mid + 1
-
-        # Apply pruning and do one final lzma compress to verify
-        for i in range(best_n):
-            quant_result[sorted_keys[i]].view(-1)[all_flat_idx[i]] = 0
-        quant_raw = _serialize_quant(quant_result, quant_meta)
-        quant_blob = _compress_final(quant_raw)
-        final_size = len(quant_blob) + code_bytes_est
-
-        # If ratio estimate was off, prune a few more
-        while final_size > target_bytes and best_n < len(sorted_keys):
-            extra = min(len(sorted_keys) - best_n, max(1, (final_size - target_bytes) // 4))
-            for i in range(best_n, best_n + extra):
-                quant_result[sorted_keys[i]].view(-1)[all_flat_idx[i]] = 0
-            best_n += extra
-            quant_raw = _serialize_quant(quant_result, quant_meta)
-            quant_blob = _compress_final(quant_raw)
-            final_size = len(quant_blob) + code_bytes_est
-
-        log0(f"prune: zeroed {best_n}/{len(sorted_keys)} ±1 values, final size: {final_size} bytes")
-    else:
-        log0(f"prune: artifact {total_size} bytes fits target {target_bytes}, no pruning needed")
+    quant_buf = io.BytesIO()
+    torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
+    quant_raw = quant_buf.getvalue()
+    quant_blob = zstandard.ZstdCompressor(level=22).compress(quant_raw) if _COMPRESSOR == "zstd" else zlib.compress(quant_raw, 9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -2112,7 +2681,7 @@ def main() -> None:
     with open("final_model.int6.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(
-        io.BytesIO(lzma.decompress(quant_blob_disk) if _COMPRESSOR == "lzma" else zstandard.ZstdDecompressor().decompress(quant_blob_disk) if _COMPRESSOR == "zstd" else zlib.decompress(quant_blob_disk)),
+        io.BytesIO(zstandard.ZstdDecompressor().decompress(quant_blob_disk) if _COMPRESSOR == "zstd" else zlib.decompress(quant_blob_disk)),
         map_location="cpu",
     )
     deq_state = dequantize_mixed_int6(quant_state["w"], quant_state["m"], sd_cpu)
@@ -2128,6 +2697,7 @@ def main() -> None:
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         mlp_act=args.mlp_act, mlp_leaky_slope=args.mlp_leaky_slope,
         f1_corr_rank=args.f1_corr_rank, f1_corr_scale_init=args.f1_corr_scale_init,
+        mixer_n_experts=mixer_n_experts, mixer_neural_floor=args.mixer_neural_floor,
     ).to(device).bfloat16()
     for m in eval_model.modules():
         if isinstance(m, CastedLinear):
