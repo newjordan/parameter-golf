@@ -89,7 +89,7 @@ ARTIFACT_NGRAM=0 \
 USE_CRAWLER=1 \
 NUM_FLAT_LAYERS=4 \
 NUM_CRAWLER_LAYERS=1 \
-CRAWLER_LOOPS=2 \
+CRAWLER_LOOPS=4 \
 INST_DIM=32 \
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" \
     "${SCRIPT_DIR}/train_gpt.py" \
