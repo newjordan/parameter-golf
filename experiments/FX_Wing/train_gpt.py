@@ -137,6 +137,7 @@ class Hyperparameters:
     crawler_mlp_mult = float(os.environ.get("CRAWLER_MLP_MULT", 4.0))  # MLP width multiplier for crawler
     inst_dim = int(os.environ.get("INST_DIM", "32"))          # instruction bottleneck dim per loop (0=disabled, use legacy loop_pos)
     crawler_quant_int8 = bool(int(os.environ.get("CRAWLER_QUANT_INT8", "0")))  # use int8 for shared crawler block (multi-context quant resilience)
+    delta_net_heads = int(os.environ.get("DELTA_NET_HEADS", "0"))              # DeltaNet heads in crawler (0=disabled); state carried between loops
     # Purple-1: Dirichlet-Multinomial smoothing (PR #900 — replaces linear alpha)
     ngram_dirichlet = bool(int(os.environ.get("NGRAM_DIRICHLET", "0")))
     ngram_dirichlet_conc = float(os.environ.get("NGRAM_DIRICHLET_CONC", "5.0"))
@@ -1260,6 +1261,65 @@ class GPT(nn.Module):
 
 # ──────────────────────────────────────────────────────────────────────────────
 # F-Wing: Frugendorff Crawler GPT
+# ──────────────────────────────────────────────────────────────────────────────
+# DeltaNet associative memory — delta rule update, state carried between loops
+# Update rule: S_t += β_t * outer(v_t - S_t @ k_t, k_t)   (error correction)
+# The state S accumulates pattern associations across crawler loop iterations,
+# giving each loop genuine new information rather than repeating the same pass.
+# ──────────────────────────────────────────────────────────────────────────────
+class DeltaNetMemory(nn.Module):
+    """Delta-rule associative memory for the FX-Wing crawler reservoir.
+
+    State S (shape [B, H, Dh, Dh]) is carried between crawler loop iterations.
+    Each pass corrects prediction errors, progressively refining associations.
+    Output projection is zero-initialized so it starts as a residual no-op.
+    """
+    def __init__(self, model_dim: int, n_heads: int):
+        super().__init__()
+        assert model_dim % n_heads == 0
+        self.n_heads = n_heads
+        self.head_dim = model_dim // n_heads
+        d = model_dim
+        Dh = self.head_dim
+        H = n_heads
+        self.k_proj = nn.Linear(d, H * Dh, bias=False)
+        self.v_proj = nn.Linear(d, H * Dh, bias=False)
+        self.q_proj = nn.Linear(d, H * Dh, bias=False)
+        self.b_proj = nn.Linear(d, H, bias=True)   # per-head beta (learning rate)
+        self.o_proj = nn.Linear(H * Dh, d, bias=False)
+        self.norm   = RMSNorm()
+        nn.init.zeros_(self.o_proj.weight)          # start as identity (no-op)
+
+    def forward(self, x: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        x:     [B, T, D]
+        state: [B, H, Dh, Dh]  — carried from previous loop iteration
+        returns (x_out [B, T, D], new_state [B, H, Dh, Dh])
+        """
+        B, T, D = x.shape
+        H, Dh = self.n_heads, self.head_dim
+        k = F.normalize(self.k_proj(x).reshape(B, T, H, Dh), dim=-1)   # [B,T,H,Dh]
+        v = self.v_proj(x).reshape(B, T, H, Dh)                          # [B,T,H,Dh]
+        q = F.normalize(self.q_proj(x).reshape(B, T, H, Dh), dim=-1)   # [B,T,H,Dh]
+        beta = torch.sigmoid(self.b_proj(x))                              # [B,T,H]
+        # Sequential delta rule — process each token, carry state forward
+        S = state  # [B, H, Dh, Dh]
+        outs: list[Tensor] = []
+        for t in range(T):
+            k_t  = k[:, t]           # [B, H, Dh]
+            v_t  = v[:, t]
+            q_t  = q[:, t]
+            b_t  = beta[:, t, :, None, None]  # [B, H, 1, 1]
+            # Read: y = S @ q
+            y_t  = torch.einsum("bhij,bhj->bhi", S, q_t)       # [B, H, Dh]
+            # Delta rule write: S += β * outer(v - S@k, k)
+            pred = torch.einsum("bhij,bhj->bhi", S, k_t)       # [B, H, Dh]
+            S    = S + b_t * torch.einsum("bhi,bhj->bhij", v_t - pred, k_t)
+            outs.append(y_t)
+        y = torch.stack(outs, dim=1).reshape(B, T, H * Dh)     # [B, T, H*Dh]
+        return self.norm(x + self.o_proj(y)), S
+
+
 # flat blocks (unique, U-Net enc/dec) + crawler blocks (shared, looped K times)
 # Compression: fewer unique blocks → same BPB → smaller artifact → freed budget
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1295,6 +1355,7 @@ class CrawlerGPT(nn.Module):
         mixer_loss_weight: float = 0.1,
         mixer_neural_floor: float = 0.05,
         inst_dim: int = 32,
+        delta_net_heads: int = 0,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)
@@ -1372,6 +1433,8 @@ class CrawlerGPT(nn.Module):
             self.loop_pos = None
             self.loop_inst_proj = None
             self.loop_inst_up = None
+        # DeltaNet memory — state carried between crawler loop iterations
+        self.delta_net = DeltaNetMemory(model_dim, delta_net_heads) if delta_net_heads > 0 and num_crawler_layers > 0 else None
         # VE on crawler blocks
         self.ve_layer_indices = [int(x) for x in ve_layers.split(",") if x.strip()] if ve_enabled else []
         kv_dim = self._ve_target_dim
@@ -1451,6 +1514,16 @@ class CrawlerGPT(nn.Module):
         else:
             inst = None
 
+        # DeltaNet state — initialized to zero, carried across loop iterations
+        if self.delta_net is not None:
+            B, T, D = x.shape
+            delta_state = torch.zeros(
+                B, self.delta_net.n_heads, self.delta_net.head_dim, self.delta_net.head_dim,
+                device=x.device, dtype=x.dtype,
+            )
+        else:
+            delta_state = None
+
         for loop in range(self.crawler_loops):
             if inst is not None:
                 # Content-adaptive offset: encoder plans each loop's behavior
@@ -1463,6 +1536,9 @@ class CrawlerGPT(nn.Module):
             for ci, block in enumerate(self.crawler_blocks):
                 ve = self._get_crawler_ve(ci, input_ids, ve_cache)
                 x_loop = block(x_loop, x0, v_embed=ve)
+            # DeltaNet: correct prediction errors, carry refined state to next loop
+            if self.delta_net is not None:
+                x_loop, delta_state = self.delta_net(x_loop, delta_state)
             x = x_loop
         return x
 
@@ -1594,6 +1670,7 @@ def build_model(args: Hyperparameters, device: torch.device) -> nn.Module:
             mixer_loss_weight=args.mixer_loss_weight,
             mixer_neural_floor=args.mixer_neural_floor,
             inst_dim=args.inst_dim,
+            delta_net_heads=args.delta_net_heads,
         )
     else:
         model = GPT(
