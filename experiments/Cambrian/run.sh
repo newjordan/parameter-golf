@@ -44,7 +44,7 @@ echo "  Stack: Muon + XSA + Trigram + N-gram eval"
 echo "============================================"
 
 SEED="$SEED" \
-MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-180}" \
+MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-600}" \
 COMPILE_FULLGRAPH=0 \
 COMPLEMENT_ALPHA=0 \
 XSA_LAST_N=11 \
