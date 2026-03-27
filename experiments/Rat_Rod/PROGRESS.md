@@ -10,7 +10,8 @@ Push base model BPB from 1.11 → 1.08 on 8xH100, 600s wallclock, no GPTQ.
 | Old SOTA (green_1) | 1.1195 | 1.1384 | 0.3200 (ILLEGAL oracle) | 6823 | 87.95 | XSA=4, Bigram=1536, RoPE=24, SWA=100, GPTQ outside wallclock |
 | **Rat Rod Green v1** | **1.1129** | **1.1364** | **0.4489** | **6882** | **87.20** | Parallel Muon, XSA=11, Bigram=2048, RoPE=16, SWA=50, no GPTQ, no complementary |
 | Rat Rod Green v2 | 1.1132 | 1.1367 | 0.4490 | 6875 | 87.28 | v1 + TRIGRAM=1, LATE_QAT_THRESHOLD=0 — **WASH** |
-| **Rat Rod Green v3** | **PENDING** | — | — | — | — | v1 base + MTP_NUM_HEADS=2, LATE_QAT_THRESHOLD=0 |
+| Rat Rod Green v3 | PENDING | — | — | — | — | v1 base + MTP_NUM_HEADS=2 (vanilla MTP) |
+| **Rat Rod Green v4 "Synapse"** | **PENDING** | — | — | — | — | HS-MTP + CPU N-gram Bridge |
 
 ## v1 Full Log Metrics (2026-03-27)
 ```
@@ -81,15 +82,51 @@ NGRAM_ORDER_MULTS="0.3,0.3,0.97,2.0,2.0,2.0,2.0,2.0"
 - INT8 quantization helpers (dead code)
 - Complementary training (COMPLEMENT_ALPHA=0) — intentionally weakens base model
 
-## Untested Levers (in order of priority)
-1. ~~LATE_QAT_THRESHOLD=0~~ (v2)
-2. ~~TRIGRAM=1~~ (v2)
-3. MTP_NUM_HEADS=2 — auxiliary multi-token prediction loss, ~2-3ms/step cost
-4. VALUE_RESIDUAL=1 — deep layers access first-layer values via sigmoid gate
-5. GATED_ATTENTION=1 — learned per-head attention gating
-6. ROPE_DIMS 16 vs 24 — A/B test
-7. SWA_EVERY 50 vs 100 — A/B test
-8. WARMDOWN_ITERS tuning (currently 3500, ~50% of training)
+## "Synapse" — HS-MTP + CPU N-gram Bridge (v4)
+
+A symbiotic system connecting the training loop and the n-gram eval pipeline.
+
+**Architecture:**
+```
+GPU training loop                      CPU background thread
+─────────────────                      ────────────────────
+tokens (x) ──────────────────────────→ XOR hash → count tables
+                                              │
+model forward:                                │
+  main CE loss (unchanged)                    │
+  + HS-MTP loss ←── weight tensor ←───────────┘
+    4 heads (512→2048 hash vocab)        (per-token: high where
+    predict bigram hash patterns          n-grams are weak)
+    at depths 1-4
+```
+
+**How it works:**
+1. CPU thread builds n-gram frequency tables from training tokens (same XOR hash as BigramHash/n-gram eval)
+2. Each step, CPU computes per-token "n-gram confidence" — how well n-grams will predict each token
+3. Confidence is inverted to weight: easy tokens (n-gram confident) → 0.3x, hard tokens → 3.0x
+4. HS-MTP heads are trained to predict n-gram hash patterns, weighted by difficulty
+5. Model learns richer representations exactly where n-grams can't help
+
+**Why it's novel:**
+- No GPU cost for weighting (CPU integer ops, async queue, never blocks GPU)
+- Training signal directly mirrors eval behavior (same hash space)
+- Model and n-gram eval become symbiotic — model focuses on what n-grams can't do
+
+**Config:** `HSMTP_NUM_HEADS=4 HSMTP_LOSS_WEIGHT=0.3`
+**Dir:** `experiments/Rat_Rod/green_v4_hsmtp/`
+
+## Tested Levers
+1. ~~LATE_QAT_THRESHOLD=0~~ (v2) — **WASH**, EMA/SWA smoothed the noise anyway
+2. ~~TRIGRAM=1~~ (v2) — **WASH**, shared table pulled in conflicting directions
+3. ~~MTP_NUM_HEADS=2~~ (v3) — PENDING result (vanilla MTP)
+4. **Synapse HS-MTP** (v4) — PENDING result
+
+## Untested Levers
+1. VALUE_RESIDUAL=1 — deep layers access first-layer values via sigmoid gate
+2. GATED_ATTENTION=1 — learned per-head attention gating
+3. ROPE_DIMS 16 vs 24 — A/B test in progress
+4. SWA_EVERY 50 vs 100 — A/B test
+5. WARMDOWN_ITERS tuning (currently 3500, ~50% of training)
 
 ## A/B Tests (200s wallclock, directional signal only)
 
