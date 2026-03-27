@@ -1,21 +1,25 @@
 #!/bin/bash
 set -euo pipefail
-# MASTER RUNNER: All concept experiments, 180s each, H100 target
-# Usage: bash experiments/master_run.sh
-# Override: WALLCLOCK=180 NPROC=8 bash experiments/master_run.sh
+# BIOLOGY CONCEPTS SWEEP
+# Runs all bio-inspired concept experiments vs green baseline.
+# Usage:   bash experiments/Biology_concepts/run_all.sh
+# H100:    WALLCLOCK=180 NPROC=8 bash experiments/Biology_concepts/run_all.sh
+# Quick:   WALLCLOCK=60  NPROC=1 bash experiments/Biology_concepts/run_all.sh
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 export PATH="/home/frosty40/miniconda3/bin:${PATH}"
 
 WALLCLOCK="${WALLCLOCK:-180}"
 NPROC="${NPROC:-8}"
 SEED="${SEED:-1337}"
-LOG_DIR="${REPO_ROOT}/logs/master_$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="${REPO_ROOT}/logs/bio_concepts_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 
 echo "========================================================"
-echo "  MASTER CONCEPT SWEEP  wallclock=${WALLCLOCK}s  gpus=${NPROC}"
+echo "  BIOLOGY CONCEPTS SWEEP"
+echo "  wallclock=${WALLCLOCK}s per arm  |  gpus=${NPROC}  |  seed=${SEED}"
+echo "  Concepts: tornado, theta_gamma, myelin, circadian, astrocyte, clonal_selection"
 echo "  Logs: ${LOG_DIR}"
 echo "========================================================"
 
@@ -73,5 +77,5 @@ for i in "${!NAMES[@]}"; do
 done
 
 echo "========================================================"
-echo "  negative delta = improvement over green baseline"
+echo "  negative delta = improvement over green v1 baseline (1.1129 BPB SOTA)"
 echo "========================================================"
