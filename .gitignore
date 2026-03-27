@@ -11,3 +11,4 @@ data/docs_selected.jsonl
 logs/
 experiments/archive/checkpoints/
 experiments/FA_Wing_Green_1/
+experiments/FA_Wing_GreenDN_1/
