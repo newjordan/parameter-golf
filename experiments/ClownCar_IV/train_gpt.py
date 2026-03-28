@@ -3142,12 +3142,6 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
-    # GPTQ calibration: collect Hessians from training data DURING training phase
-    # (must happen before training ends to comply with eval-time data access rules)
-    log0("gptq:calibrating with training data...")
-    t_gptq = time.perf_counter()
-    gptq_hessians = gptq_calibrate(base_model, args.train_files, device, n_samples=256, seq_len=args.train_seq_len)
-    log0(f"gptq:calibrated {len(gptq_hessians)} layers in {time.perf_counter()-t_gptq:.1f}s")
     if args.distill_enabled and args.distill_steps > 0:
         log0(
             f"distill:start steps:{args.distill_steps} lr_factor:{args.distill_lr_factor} "
@@ -3239,11 +3233,7 @@ def main() -> None:
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
-    # GPTQ quantization using Hessians collected during training phase (no training data access here)
-    quant_result, quant_meta = mixed_quantize_int6_gptq(
-        sd_cpu, {"mlp", "attn", "aux"}, gptq_hessians,
-        crawler_int8=args.crawler_quant_int8,
-    )
+    quant_result, quant_meta = mixed_quantize_int6(sd_cpu, {"mlp", "attn", "aux"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
