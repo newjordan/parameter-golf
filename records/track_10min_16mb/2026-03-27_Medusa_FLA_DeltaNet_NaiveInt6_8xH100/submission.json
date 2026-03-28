@@ -1,35 +1,36 @@
 {
   "author": "Frosty40",
   "github_id": "newjordan",
-  "name": "Medusa: Canonical FLA DeltaNet + Naive Int6 (GPTQ bypass)",
-  "blurb": "Successor to PR #990 (ClownCar, 1.1813 BPB). Catalyzed by PR #875 (@shalyhinpavel, GDN 1.0226) — the same chunk_delta_rule mechanism that makes GDN explosive is symbiotic with the crawler topology here. Adds DELTA_NET_HEADS=4, bypasses GPTQ (SKIP_GPTQ=1, which degraded 0.7278→0.9340 in ClownCar_II), and fixes BF16 state dtype recompile bug. 4 flat + 1 crawler × 4 loops, INST_DIM=32, CRAWLER_QUANT_INT8=1. 3-seed mean val_bpb=PENDING.",
-  "date": "2026-03-27",
-  "seed_1337": {
-    "val_bpb": "PENDING",
-    "sliding_window_bpb": "PENDING",
-    "post_ema_bpb": "PENDING",
-    "steps": "PENDING",
+  "name": "Medusa: DeltaNet (DELTA_NET_HEADS=4) + Loop-Aware GPTQ + Late-Start EMA",
+  "blurb": "Successor to PR #990 (ClownCar, 1.1813 BPB). Catalyzed by PR #875 (@shalyhinpavel, GDN 1.0226). Adds DELTA_NET_HEADS=4 (canonical chunk_delta_rule), loop-aware 2-phase GPTQ, late-start EMA (step 4400, decay=0.99). 4 flat + 1 crawler x 4 loops, INST_DIM=32. NOTE: this variant (Medusa_IV) has state dtype bug in eval path — see Medusa_V for fix.",
+  "date": "2026-03-28",
+  "seed_300": {
+    "val_bpb": 0.3736,
+    "sliding_window_bpb": 0.95777934,
+    "post_ema_bpb": 0.3882,
+    "steps": 4880,
     "train_time_s": 600,
-    "eval_time_s": "PENDING"
+    "eval_time_s": "~110s"
+  },
+  "seed_1337": {
+    "val_bpb": 0.6989,
+    "sliding_window_bpb": 1.22693269,
+    "post_ema_bpb": 0.7126,
+    "steps": 4876,
+    "train_time_s": 600,
+    "eval_time_s": "~108s"
   },
   "seed_42": {
-    "val_bpb": "PENDING",
-    "sliding_window_bpb": "PENDING",
-    "post_ema_bpb": "PENDING",
-    "steps": "PENDING",
+    "val_bpb": "NOT RUN — pod closed",
+    "sliding_window_bpb": "NOT RUN",
+    "post_ema_bpb": "NOT RUN",
+    "steps": "NOT RUN",
     "train_time_s": 600,
-    "eval_time_s": "PENDING"
+    "eval_time_s": "NOT RUN"
   },
-  "seed_123": {
-    "val_bpb": "PENDING",
-    "sliding_window_bpb": "PENDING",
-    "post_ema_bpb": "PENDING",
-    "steps": "PENDING",
-    "train_time_s": 600,
-    "eval_time_s": "PENDING"
-  },
-  "val_bpb": "PENDING",
-  "bytes_total": "PENDING",
-  "bytes_code": "PENDING",
-  "hardware": "8xH100 SXM"
+  "val_bpb": "INCOMPLETE — seed 42 not run",
+  "bytes_total": 9956729,
+  "bytes_code": 180226,
+  "hardware": "8xH100 SXM",
+  "notes": "High cross-seed variance: seed 300=0.9578 vs seed 1337=1.2269 (gap 0.269). ClownCar gap was 0.00015. DeltaNet heads introduce seed sensitivity. Log files on pod — may be lost. Numbers from session memory."
 }
