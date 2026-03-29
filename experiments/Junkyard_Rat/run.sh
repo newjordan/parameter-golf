@@ -5,9 +5,11 @@ set -euo pipefail
 # Goal: improve honest base-model quality before Triton/artifact work
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
+export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-${REPO_ROOT}/data/tokenizers/fineweb_1024_bpe.model}"
 
 SEED="${SEED:-1337}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
@@ -26,6 +28,11 @@ except ImportError:
     if v.startswith('3'): print(f'  FA3 v{v} OK')
     else: print(f'  WARNING: FA{v[0]} detected — want FA3')
 " 2>/dev/null || echo "  WARNING: no flash_attn found"
+
+echo "[preflight] tokenizer path: ${TOKENIZER_PATH}"
+[[ -f "${TOKENIZER_PATH}" ]] || { echo "  ERROR: tokenizer not found"; exit 1; }
+echo "[preflight] data path: ${DATA_PATH}"
+[[ -d "${DATA_PATH}" ]] || { echo "  ERROR: data path not found"; exit 1; }
 
 echo "============================================"
 echo "  JUNKYARD RAT — Rat Rod v1 + Coprime Loader"
