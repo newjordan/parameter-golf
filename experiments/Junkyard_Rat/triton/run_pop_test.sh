@@ -13,6 +13,7 @@ echo "============================================"
 
 exec env \
     MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-180}" \
+    WARMUP_STEPS="${WARMUP_STEPS:-0}" \
     VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-1000}" \
     TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-250}" \
     POST_EMA_DIAGNOSTIC="${POST_EMA_DIAGNOSTIC:-0}" \
