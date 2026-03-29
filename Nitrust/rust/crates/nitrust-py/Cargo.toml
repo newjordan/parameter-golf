@@ -1,0 +1,14 @@
+[package]
+name = "nitrust-py"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "nitrust_py"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nitrust-mmap-loader = { path = "../nitrust-mmap-loader" }
+nitrust-pinned-batcher = { path = "../nitrust-pinned-batcher" }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }

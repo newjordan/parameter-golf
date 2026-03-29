@@ -1,0 +1,9 @@
+[package]
+name = "nitrust-pinned-batcher"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+libc.workspace = true
+thiserror.workspace = true
