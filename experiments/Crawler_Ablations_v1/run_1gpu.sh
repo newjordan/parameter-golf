@@ -12,7 +12,7 @@ export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
 
 # ── Runtime knobs (overridable from environment) ───────────────────────────────
 SEED="${SEED:-1337}"
-NPROC=1
+NPROC="${NPROC_PER_NODE:-1}"
 NITRUST_ENABLE="${NITRUST_ENABLE:-1}"
 NITRUST_STRICT="${NITRUST_STRICT:-1}"
 NITRUST_SO_PATH="${NITRUST_SO_PATH:-Nitrust/rust/target/release/libnitrust_py.so}"
