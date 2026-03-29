@@ -23,6 +23,9 @@ export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
 
 SEED="${SEED:-1337}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+COMPILE_ENABLED="${COMPILE_ENABLED:-1}"
+COMPILE_FULLGRAPH="${COMPILE_FULLGRAPH:-0}"
+TORCHDYNAMO_SUPPRESS_ERRORS="${TORCHDYNAMO_SUPPRESS_ERRORS:-1}"
 
 echo "[preflight] checking zstandard..."
 python3 -c "import zstandard; print(f'  zstandard {zstandard.__version__} OK')" 2>/dev/null \
@@ -81,6 +84,9 @@ PHRASE_CONCENTRATION=2.0 \
 PHRASE_MIN_COUNT=1 \
 REGIME_TRACKER=1 \
 ARTIFACT_NGRAM=0 \
+COMPILE_ENABLED="${COMPILE_ENABLED}" \
+COMPILE_FULLGRAPH="${COMPILE_FULLGRAPH}" \
+TORCHDYNAMO_SUPPRESS_ERRORS="${TORCHDYNAMO_SUPPRESS_ERRORS}" \
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" \
     "${SCRIPT_DIR}/train_gpt.py" \
     2>&1 | tee "logs/ratrod_purple1_s${SEED}_$(date +%Y%m%d_%H%M%S).log"
