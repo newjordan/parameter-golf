@@ -96,6 +96,24 @@ Decision rule:
 - one compensation change at a time
 - no kitchen-sink "fix numerics everywhere" patch
 
+### Completed first sweep
+
+Completed on 2026-03-29 as accidental full `600s` runs:
+
+1. base `triton_act`
+2. `mlp_scale=0.98`
+3. `mlp_scale=1.02`
+4. `attn_scale=0.98`
+5. `attn_scale=1.02`
+6. `resid_mix=(0.98,0.02)`
+
+Result:
+- `attn_scale=1.02` won the sweep
+- all other tested deltas lost
+
+Immediate next step:
+- one full confirmation run with `ATTN_SCALE_INIT=1.02` and final eval enabled
+
 ### `180s` pop-test lane
 
 Use short pop tests to screen compensation knobs before spending a full run.
@@ -121,6 +139,11 @@ Batch sequence:
 Pop-test decision rule:
 - keep only variants that improve the cap-time validation trajectory without obvious throughput collapse
 - promote winners to a full `600s` run
+
+Status:
+- infrastructure fixed on `test`
+- no need to rerun the already-completed first sweep as pop tests
+- use the short-screen lane only for new knobs after `TR-02` confirmation
 
 ## Stage 4: Real Fusion
 
