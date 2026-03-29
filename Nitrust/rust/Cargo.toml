@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/nitrust-mmap-loader",
+    "crates/nitrust-pinned-batcher",
+    "crates/nitrust-py",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+libc = "0.2"
+memmap2 = "0.9"
+pyo3 = { version = "0.23", features = ["abi3-py39"] }
+thiserror = "2"

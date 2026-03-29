@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+CRAWLER_RUN="${REPO_ROOT}/experiments/Crawler_Leg_1/run.sh"
+MEDUSA_RUN="${REPO_ROOT}/experiments/Medusa/run.sh"
+PREFLIGHT_SCRIPT="${SCRIPT_DIR}/medusa_nitrust_preflight.sh"
 
 MODE="${MODE:-full}" # smoke | full | both
 SEED="${SEED:-1337}"
@@ -34,8 +37,26 @@ run_smoke() {
 }
 
 run_full() {
-  echo "[1gpu] running nitrust preflight..."
-  "${SCRIPT_DIR}/medusa_nitrust_preflight.sh"
+  local run_target="${CRAWLER_RUN}"
+  if [ ! -f "${run_target}" ]; then
+    echo "[1gpu] warning: missing ${CRAWLER_RUN}; falling back to ${MEDUSA_RUN}"
+    run_target="${MEDUSA_RUN}"
+  fi
+  if [ ! -f "${run_target}" ]; then
+    echo "[1gpu] fatal: no runnable launcher found (${CRAWLER_RUN} or ${MEDUSA_RUN})"
+    exit 1
+  fi
+
+  if [ "${NITRUST_ENABLE}" = "1" ]; then
+    if [ -f "${PREFLIGHT_SCRIPT}" ]; then
+      echo "[1gpu] running nitrust preflight..."
+      "${PREFLIGHT_SCRIPT}"
+    else
+      echo "[1gpu] warning: missing ${PREFLIGHT_SCRIPT}; disabling nitrust for this run"
+      NITRUST_ENABLE=0
+      NITRUST_STRICT=0
+    fi
+  fi
 
   echo "[1gpu] launching full crawler leg (nproc=1)..."
   cd "${REPO_ROOT}"
@@ -47,7 +68,7 @@ run_full() {
   NITRUST_LOCAL_SPAN="${NITRUST_LOCAL_SPAN}" \
   TRITON_CRAWLER_FLOW="${TRITON_CRAWLER_FLOW}" \
   TRITON_CRAWLER_FLOW_STRICT="${TRITON_CRAWLER_FLOW_STRICT}" \
-  bash "${REPO_ROOT}/experiments/Crawler_Leg_1/run.sh"
+  bash "${run_target}"
 }
 
 case "${MODE}" in
