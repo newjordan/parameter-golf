@@ -5,7 +5,19 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 SO_PATH="${SO_PATH:-${REPO_ROOT}/Nitrust/rust/target/release/libnitrust_py.so}"
 DATA_GLOB="${DATA_GLOB:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024/fineweb_train_*.bin}"
+TOKENIZER="${REPO_ROOT}/data/tokenizers/fineweb_1024_bpe.model"
 export SO_PATH DATA_GLOB
+
+# ── Tokenizer check ────────────────────────────────────────────────────────────
+if [ ! -f "${TOKENIZER}" ]; then
+    echo "[preflight] tokenizer missing — downloading from sproos/parameter-golf-tokenizers..."
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('sproos/parameter-golf-tokenizers', allow_patterns='tokenizers/*', local_dir='${REPO_ROOT}/data')"
+    if [ ! -f "${TOKENIZER}" ]; then
+        echo "[preflight] FATAL: tokenizer still missing after download: ${TOKENIZER}"
+        exit 1
+    fi
+    echo "[preflight] tokenizer OK"
+fi
 
 "${SCRIPT_DIR}/build_nitrust_py.sh"
 

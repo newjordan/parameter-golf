@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # What it does:
 #   1. Clones/syncs repo to the 'test' branch
-#   2. Installs deps (pip, zstandard, FA3, dataset)
+#   2. Installs deps (pip, zstandard, FA3, dataset, nitrust rust bridge)
 #   3. Verifies everything works
 #   4. Done. You run your experiment manually.
 # =============================================================================
@@ -16,6 +16,7 @@ set -euo pipefail
 REPO_URL="https://github.com/newjordan/parameter-golf.git"
 BRANCH="test"
 WORKSPACE="/workspace/parameter-golf"
+SETUP_NITRUST="${SETUP_NITRUST:-1}"
 
 echo "============================================"
 echo "  POD SETUP"
@@ -160,18 +161,45 @@ if [ "$TRAIN_COUNT" -ge 10 ]; then
     echo "  Already have $TRAIN_COUNT train / $VAL_COUNT val shards"
 else
     echo "  Downloading ($TRAIN_COUNT train shards found, need 10+)..."
-    if command -v huggingface-cli &>/dev/null; then
-        huggingface-cli download sproos/parameter-golf-tokenizers \
-            --include "datasets/fineweb10B_sp1024/*" --local-dir "${WORKSPACE}/data"
-    else
-        python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download('sproos/parameter-golf-tokenizers',
-    allow_patterns='datasets/fineweb10B_sp1024/*',
-    local_dir='${WORKSPACE}/data')
-"
-    fi
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('sproos/parameter-golf-tokenizers', allow_patterns='datasets/fineweb10B_sp1024/*', local_dir='${WORKSPACE}/data')"
     echo "  Downloaded"
+fi
+
+TOKENIZER="${WORKSPACE}/data/tokenizers/fineweb_1024_bpe.model"
+if [ -f "${TOKENIZER}" ]; then
+    echo "  Tokenizer already present"
+else
+    echo "  Downloading tokenizer (fineweb_1024_bpe.model)..."
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('sproos/parameter-golf-tokenizers', allow_patterns='tokenizers/*', local_dir='${WORKSPACE}/data')"
+    if [ -f "${TOKENIZER}" ]; then
+        echo "  Tokenizer OK: ${TOKENIZER}"
+    else
+        echo "  FATAL: tokenizer not found after download: ${TOKENIZER}"
+        exit 1
+    fi
+fi
+
+# =============================================================================
+# 6b. Nitrust Rust bridge preflight (optional, enabled by default)
+# =============================================================================
+echo ""
+echo "[6b/6] Nitrust Rust bridge..."
+
+if [ "${SETUP_NITRUST}" = "1" ]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "  WARNING: cargo not found — skipping Nitrust Rust build."
+        echo "  Run with NITRUST_ENABLE=0 until Rust toolchain is installed."
+        echo "  Skipped"
+    else
+        if [ ! -f "${WORKSPACE}/Nitrust/scripts/medusa_nitrust_preflight.sh" ]; then
+            echo "  FATAL: missing Nitrust preflight script at Nitrust/scripts/medusa_nitrust_preflight.sh"
+            exit 1
+        fi
+        bash "${WORKSPACE}/Nitrust/scripts/medusa_nitrust_preflight.sh"
+        echo "  Nitrust bridge built + preflight passed"
+    fi
+else
+    echo "  Skipped (SETUP_NITRUST=0)"
 fi
 
 # =============================================================================
@@ -223,6 +251,22 @@ try:
     print(f"fla           : chunk_delta_rule OK")
 except ImportError:
     print("fla           : MISSING — DeltaNet will use slow Python loop!")
+
+import os, importlib.util
+so_path = "./Nitrust/rust/target/release/libnitrust_py.so"
+if os.path.exists(so_path):
+    try:
+        spec = importlib.util.spec_from_file_location("nitrust_py", so_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("bad import spec")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ok = hasattr(mod, "mmap_read_tokens") and hasattr(mod, "build_lm_batch")
+        print(f"nitrust_py    : {'OK' if ok else 'MISSING FUNCS'} ({so_path})")
+    except Exception as e:
+        print(f"nitrust_py    : FAILED ({e})")
+else:
+    print(f"nitrust_py    : NOT BUILT ({so_path})")
 
 train = sorted(glob.glob("./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin"))
 val   = sorted(glob.glob("./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin"))
