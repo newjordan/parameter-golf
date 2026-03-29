@@ -40,6 +40,17 @@ Primary metrics:
 - `post_ema`
 - `final_sliding_window_exact`
 
+Result:
+- `TR-01` lost to `JR-01`
+- keep archived result, but do not kill the whole Triton track
+
+### `TR-01a`
+- next target: tune the current activation kernel before broader fusion
+- likely levers:
+  - Triton block size
+  - vectorization / program shape
+  - compile interaction around the kernel path
+
 ## Stage 2: Kernel-Adjacent Runtime Tuning
 
 These stay code-light and keep the same kernel.

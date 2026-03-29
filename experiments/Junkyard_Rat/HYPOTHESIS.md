@@ -203,6 +203,12 @@ python experiments/Junkyard_Rat/bench_triton.py
 bash experiments/Junkyard_Rat/run_triton_candidate.sh
 ```
 
+Triton work area:
+
+```bash
+ls experiments/Junkyard_Rat/triton
+```
+
 Interpretation rule:
 - if `bench_triton.py` shows meaningful forward+backward speedup, run `JR-02`
 - if the full run does not improve either step time or final sliding BPB, move it to `losers/`

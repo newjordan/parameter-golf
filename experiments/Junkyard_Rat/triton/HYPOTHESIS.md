@@ -49,6 +49,20 @@ So Triton needs its own track.
 - custom Triton activation kernel in the real MLP branch
 - same loader winner underneath
 
+### First result: `TR-01` loses, but the surface is live
+
+Measured on the winner stack:
+
+| Variant | Step avg | Post-EMA BPB | Sliding BPB | Decision |
+|---|---:|---:|---:|---|
+| `JR-01` eager MLP | `91.00ms` | `1.1340` | `1.11056240` | active winner |
+| `TR-01` `triton_act` | `91.11ms` | `1.1345` | `1.11099954` | loser |
+
+Interpretation:
+- no meaningful speed gain
+- slight BPB regression
+- but the kernel path is stable and close enough to justify tuning work rather than deleting the track
+
 ## Core Hypotheses
 
 ### H1: activation-kernel path is a live optimization surface
