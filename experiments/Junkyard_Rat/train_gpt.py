@@ -97,6 +97,10 @@ class Hyperparameters:
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
     gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
     value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))  # VRL with sigmoid gates (off by default, risky)
+    attn_scale_init = float(os.environ.get("ATTN_SCALE_INIT", 1.0))
+    mlp_scale_init = float(os.environ.get("MLP_SCALE_INIT", 1.0))
+    resid_mix_x_init = float(os.environ.get("RESID_MIX_X_INIT", 1.0))
+    resid_mix_x0_init = float(os.environ.get("RESID_MIX_X0_INIT", 0.0))
     complement_alpha = float(os.environ.get("COMPLEMENT_ALPHA", "0"))
     ngram_eval_order = int(os.environ.get("NGRAM_EVAL_ORDER", 0))
     ngram_eval_min_order = int(os.environ.get("NGRAM_EVAL_MIN_ORDER", 2))
@@ -944,9 +948,20 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
                                         gated_attention=gated_attention, value_residual=value_residual)
         self.mlp = MLP(dim, mlp_mult)
-        self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
+        attn_scale_init = float(os.environ.get("ATTN_SCALE_INIT", "1.0"))
+        mlp_scale_init = float(os.environ.get("MLP_SCALE_INIT", "1.0"))
+        resid_mix_x_init = float(os.environ.get("RESID_MIX_X_INIT", "1.0"))
+        resid_mix_x0_init = float(os.environ.get("RESID_MIX_X0_INIT", "0.0"))
+        self.attn_scale = nn.Parameter(torch.full((dim,), attn_scale_init, dtype=torch.float32))
+        self.mlp_scale = nn.Parameter(torch.full((dim,), mlp_scale_init, dtype=torch.float32))
+        self.resid_mix = nn.Parameter(
+            torch.stack(
+                (
+                    torch.full((dim,), resid_mix_x_init, dtype=torch.float32),
+                    torch.full((dim,), resid_mix_x0_init, dtype=torch.float32),
+                )
+            )
+        )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
         if dtg:
             self.dtg_gate = nn.Linear(dim, 1, bias=True)
@@ -1848,6 +1863,11 @@ def main() -> None:
         f"fullgraph={int(args.compile_fullgraph)}"
     )
     log0(f"mlp_kernel_mode:{args.mlp_kernel_mode or 'eager'}")
+    log0(
+        f"scale_init:attn={args.attn_scale_init:.4f} mlp={args.mlp_scale_init:.4f} "
+        f"resid_mix=({args.resid_mix_x_init:.4f},{args.resid_mix_x0_init:.4f}) "
+        f"ln_scale={int(args.ln_scale)}"
+    )
     log0(f"seed:{args.seed}")
     train_loader = build_train_loader(args, rank, world_size, device)
     log0(train_loader.describe())

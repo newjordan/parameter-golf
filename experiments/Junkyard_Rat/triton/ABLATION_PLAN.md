@@ -96,6 +96,32 @@ Decision rule:
 - one compensation change at a time
 - no kitchen-sink "fix numerics everywhere" patch
 
+### `180s` pop-test lane
+
+Use short pop tests to screen compensation knobs before spending a full run.
+
+Defaults:
+- `MAX_WALLCLOCK_SECONDS=180`
+- `VAL_LOSS_EVERY=1000`
+- `SKIP_FINAL_EVAL=1`
+- `POST_EMA_DIAGNOSTIC=0`
+
+Initial pop-test ladder:
+
+1. `run_pop_triton_base.sh`
+2. `run_pop_mlp_scale_098.sh`
+3. `run_pop_mlp_scale_102.sh`
+4. `run_pop_residmix_098_002.sh`
+
+Batch sequence:
+- `run_delta_sequence.sh`
+- runs six one-variable deltas back-to-back
+- default budget: `6 x 170s` train caps, roughly a 20 minute screen including overhead
+
+Pop-test decision rule:
+- keep only variants that improve the cap-time validation trajectory without obvious throughput collapse
+- promote winners to a full `600s` run
+
 ## Stage 4: Real Fusion
 
 If `TR-01` or tuned descendants stay alive:
@@ -115,6 +141,26 @@ python experiments/Junkyard_Rat/bench_triton.py
 
 ```bash
 bash experiments/Junkyard_Rat/triton/run_jr02_triton_act.sh
+```
+
+```bash
+bash experiments/Junkyard_Rat/triton/pop_tests/run_pop_triton_base.sh
+```
+
+```bash
+bash experiments/Junkyard_Rat/triton/pop_tests/run_pop_mlp_scale_098.sh
+```
+
+```bash
+bash experiments/Junkyard_Rat/triton/pop_tests/run_pop_mlp_scale_102.sh
+```
+
+```bash
+bash experiments/Junkyard_Rat/triton/pop_tests/run_pop_residmix_098_002.sh
+```
+
+```bash
+bash experiments/Junkyard_Rat/triton/pop_tests/run_delta_sequence.sh
 ```
 
 ```bash
