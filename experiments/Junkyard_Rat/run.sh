@@ -37,6 +37,7 @@ echo "[preflight] data path: ${DATA_PATH}"
 echo "============================================"
 echo "  JUNKYARD RAT — Rat Rod v1 + Coprime Loader"
 echo "  Seed: ${SEED}"
+echo "  Loader mode: ${LOADER_MODE:-coprime}"
 echo "  Base-first lane | no trigram | no n-gram eval"
 echo "  Importing #1060 loader before Triton"
 echo "  Parallel Muon | XSA-all-11 | Bigram 2048 | RoPE 16"
@@ -46,10 +47,10 @@ mkdir -p logs
 
 SEED="$SEED" \
 MAX_WALLCLOCK_SECONDS=600 \
-LOADER_MODE=coprime \
-COPRIME_MAX_LOADED_SHARDS=1 \
-COPRIME_SHARDS_PER_BATCH=1 \
-COPRIME_SHARD_HOLD_STEPS=64 \
+LOADER_MODE="${LOADER_MODE:-coprime}" \
+COPRIME_MAX_LOADED_SHARDS="${COPRIME_MAX_LOADED_SHARDS:-1}" \
+COPRIME_SHARDS_PER_BATCH="${COPRIME_SHARDS_PER_BATCH:-1}" \
+COPRIME_SHARD_HOLD_STEPS="${COPRIME_SHARD_HOLD_STEPS:-64}" \
 COMPLEMENT_ALPHA=0 \
 XSA_LAST_N=11 \
 BIGRAM_VOCAB_SIZE=2048 \
