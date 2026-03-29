@@ -27,13 +27,17 @@ class RatRodBankMLP(nn.Module):
 
 def bench(fn, x: torch.Tensor, label: str, warmup: int = 20, iters: int = 100) -> float:
     for _ in range(warmup):
+        torch.compiler.cudagraph_mark_step_begin()
         y = fn(x)
         y.sum().backward()
+        x.grad = None
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(iters):
+        torch.compiler.cudagraph_mark_step_begin()
         y = fn(x)
         y.sum().backward()
+        x.grad = None
     torch.cuda.synchronize()
     ms = (time.perf_counter() - t0) * 1000 / iters
     print(f"{label:<30} {ms:8.3f} ms")
@@ -61,7 +65,10 @@ def main() -> None:
 
     eager_ms = bench(lambda inp: eager(inp), x.detach().requires_grad_(True), "eager")
     compiled_fn = torch.compile(compiled, dynamic=False, fullgraph=False, mode="max-autotune")
-    compiled_fn(x.detach().requires_grad_(True)).sum().backward()
+    x_probe = x.detach().requires_grad_(True)
+    torch.compiler.cudagraph_mark_step_begin()
+    compiled_fn(x_probe).sum().backward()
+    x_probe.grad = None
     torch.cuda.synchronize()
     tuned_ms = bench(lambda inp: compiled_fn(inp), x.detach().requires_grad_(True), "compile(max-autotune)")
 
