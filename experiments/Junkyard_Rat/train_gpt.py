@@ -543,7 +543,9 @@ class CoprimeDistributedTokenLoader:
         if cached is not None:
             self.cache.move_to_end(file)
             return cached
-        tokens = load_data_shard(file)
+        # CPU advanced indexing is not implemented for uint16, so cache coprime-loader
+        # shards in int32 and cast to int64 only after batch assembly.
+        tokens = load_data_shard(file).to(dtype=torch.int32)
         if len(self.cache) >= self.max_loaded_shards:
             self.cache.popitem(last=False)
         self.cache[file] = tokens
