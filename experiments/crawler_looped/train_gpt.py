@@ -3053,6 +3053,11 @@ def main() -> None:
     if base_model.f1_corr_in is not None and base_model.f1_corr_out is not None:
         matrix_params.append(base_model.f1_corr_in.weight)
         matrix_params.append(base_model.f1_corr_out.weight)
+    if getattr(base_model, 'loop_fc_adapters', None) is not None:
+        for adapter in base_model.loop_fc_adapters:
+            for p in adapter.parameters():
+                if p.ndim == 2:
+                    matrix_params.append(p)
     scalar_params = [
         p
         for name, p in block_named_params
