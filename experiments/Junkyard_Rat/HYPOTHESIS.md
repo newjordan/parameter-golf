@@ -155,6 +155,24 @@ Keep fixed:
 Decision rule:
 - if loader hurts throughput or fails to improve directionally, kill it fast
 
+### Phase A result: `JR-01` wins
+
+We now have a clean first A/B on the real 80-shard dataset.
+
+| ID | Variant | Step avg | Post-EMA BPB | Sliding BPB | Decision |
+|---|---|---:|---:|---:|---|
+| `JR-00` | sequential loader | `87.08ms` | `1.1354` | `1.11184332` | loser |
+| `JR-01` | coprime loader | `91.00ms` | `1.1340` | `1.11056240` | winner |
+
+Interpretation:
+- coprime costs about `+4.5%` in step time
+- but improves sliding BPB by about `-0.00128`
+- that is enough to keep as the active base lane
+
+Organizational rule from here:
+- the active runner stays in `experiments/Junkyard_Rat/run.sh`
+- losing variants move into `experiments/Junkyard_Rat/losers/`
+
 ### Phase B: Triton-only
 
 Objective:
@@ -219,9 +237,9 @@ This garage is successful if it produces any one of these:
 
 ## Immediate Next Ablations
 
-1. Rat Rod Green v1 + coprime-stride loader
-2. Rat Rod Green v1 + fused Triton LeakyReLU^2 MLP
-3. winner of (1)/(2) + legal Full GPTQ path
+1. `JR-02`: `JR-01` winner + fused Triton LeakyReLU^2 MLP
+2. `JR-03`: best loader/systems winner + legal Full GPTQ path
+3. transfer winning systems ideas into Pocket_Bandit and Shroud_Crawler later
 
 ## References
 
