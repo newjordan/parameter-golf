@@ -113,6 +113,7 @@ class Hyperparameters:
     loader_mode = os.environ.get("LOADER_MODE", "sequential").strip().lower()
     coprime_max_loaded_shards = int(os.environ.get("COPRIME_MAX_LOADED_SHARDS", 4))
     coprime_shards_per_batch = int(os.environ.get("COPRIME_SHARDS_PER_BATCH", 4))
+    coprime_shard_hold_steps = int(os.environ.get("COPRIME_SHARD_HOLD_STEPS", 64))
 
 
 def maybe_compile(fn_or_module, *, enabled: bool, fullgraph: bool):
@@ -505,6 +506,7 @@ class CoprimeDistributedTokenLoader:
         seed: int,
         max_loaded_shards: int,
         shards_per_batch: int,
+        shard_hold_steps: int,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -535,6 +537,7 @@ class CoprimeDistributedTokenLoader:
         self.num_shards = len(self.shards)
         self.max_loaded_shards = max(1, min(max_loaded_shards, self.num_shards))
         self.shards_per_batch = max(1, min(shards_per_batch, self.num_shards))
+        self.shard_hold_steps = max(1, shard_hold_steps)
         self.batch_shard_stride = choose_coprime_stride(self.num_shards, seed * 41 + 3)
         self.batch_idx = 0
         self.shard_visits = [0 for _ in range(self.num_shards)]
@@ -570,7 +573,8 @@ class CoprimeDistributedTokenLoader:
         return (
             f"loader:coprime shards:{self.num_shards} blocks:{total_blocks} "
             f"seq_len:{self.seq_len} shards_per_batch:{self.shards_per_batch} "
-            f"cache:{self.max_loaded_shards} batch_stride:{self.batch_shard_stride}"
+            f"cache:{self.max_loaded_shards} batch_stride:{self.batch_shard_stride} "
+            f"hold_steps:{self.shard_hold_steps}"
         )
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         if seq_len != self.seq_len:
@@ -587,7 +591,8 @@ class CoprimeDistributedTokenLoader:
             raise ValueError(f"No active shards available for local_seqs={local_seqs}")
         seqs_per_shard = local_seqs // active_shards
         seq_remainder = local_seqs % active_shards
-        shard_start = ((self.batch_idx * self.world_size) + self.rank) * self.batch_shard_stride
+        hold_idx = self.batch_idx // self.shard_hold_steps
+        shard_start = ((hold_idx * self.world_size) + self.rank) * self.batch_shard_stride
         chunks: list[Tensor] = []
         for shard_slot in range(active_shards):
             count = seqs_per_shard + (1 if shard_slot < seq_remainder else 0)
@@ -615,6 +620,7 @@ def build_train_loader(args: Hyperparameters, rank: int, world_size: int, device
             seed=args.seed,
             max_loaded_shards=args.coprime_max_loaded_shards,
             shards_per_batch=args.coprime_shards_per_batch,
+            shard_hold_steps=args.coprime_shard_hold_steps,
         )
     raise ValueError(f"Unknown LOADER_MODE={args.loader_mode!r}")
 
