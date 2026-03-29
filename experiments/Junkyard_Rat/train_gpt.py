@@ -18,6 +18,12 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 try:
+    import triton
+    import triton.language as tl
+except ImportError:
+    triton = None
+    tl = None
+try:
     from flash_attn_interface import flash_attn_func as flash_attn_3_func
 except ImportError:
     flash_attn_3_func = None
@@ -111,6 +117,7 @@ class Hyperparameters:
     compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
     compile_mode = os.environ.get("COMPILE_MODE", "").strip()
     compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
+    mlp_kernel_mode = os.environ.get("MLP_KERNEL_MODE", "").strip().lower()
     loader_mode = os.environ.get("LOADER_MODE", "sequential").strip().lower()
     coprime_max_loaded_shards = int(os.environ.get("COPRIME_MAX_LOADED_SHARDS", 4))
     coprime_shards_per_batch = int(os.environ.get("COPRIME_SHARDS_PER_BATCH", 4))
@@ -124,6 +131,67 @@ def maybe_compile(fn_or_module, *, enabled: bool, fullgraph: bool, mode: str = "
     if mode:
         kwargs["mode"] = mode
     return torch.compile(fn_or_module, **kwargs)
+
+
+if triton is not None:
+    @triton.jit
+    def _leaky_relu_sq_forward_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        a = tl.where(x >= 0, x, 0.5 * x)
+        y = a * a
+        tl.store(y_ptr + offsets, y, mask=mask)
+
+    @triton.jit
+    def _leaky_relu_sq_backward_kernel(x_ptr, grad_out_ptr, grad_in_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        grad_out = tl.load(grad_out_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        a = tl.where(x >= 0, x, 0.5 * x)
+        slope = tl.where(x >= 0, 1.0, 0.5)
+        grad_in = grad_out * (2.0 * a * slope)
+        tl.store(grad_in_ptr + offsets, grad_in, mask=mask)
+
+
+class TritonLeakyReluSqFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        if triton is None or not x.is_cuda:
+            a = F.leaky_relu(x, negative_slope=0.5)
+            ctx.save_for_backward(x)
+            return a.square()
+        x_contig = x.contiguous()
+        y = torch.empty_like(x_contig)
+        n_elements = x_contig.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        _leaky_relu_sq_forward_kernel[grid](x_contig, y, n_elements, BLOCK_SIZE=1024)
+        ctx.save_for_backward(x_contig)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor) -> tuple[Tensor]:
+        (x,) = ctx.saved_tensors
+        if triton is None or not grad_out.is_cuda:
+            a = F.leaky_relu(x, negative_slope=0.5)
+            slope = torch.where(x >= 0, torch.ones_like(x), torch.full_like(x, 0.5))
+            return (grad_out * (2.0 * a * slope),)
+        grad_out_contig = grad_out.contiguous()
+        grad_in = torch.empty_like(grad_out_contig)
+        n_elements = grad_out_contig.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        _leaky_relu_sq_backward_kernel[grid](x, grad_out_contig, grad_in, n_elements, BLOCK_SIZE=1024)
+        return (grad_in,)
+
+
+def leaky_relu_sq(x: Tensor, kernel_mode: str = "") -> Tensor:
+    if kernel_mode == "triton_act":
+        return TritonLeakyReluSqFn.apply(x)
+    a = F.leaky_relu(x, negative_slope=0.5)
+    return a.square()
 
 class TrainNgramTracker:
     """Complementary training: track bigram stats, downweight tokens n-grams can predict."""
@@ -849,9 +917,11 @@ class MLP(nn.Module):
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
+        self.kernel_mode = os.environ.get("MLP_KERNEL_MODE", "").strip().lower()
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
-        return F.linear(x.square(), down_w.to(x.dtype))
+        x = F.linear(x, up_w.to(x.dtype))
+        x = leaky_relu_sq(x, kernel_mode=self.kernel_mode)
+        return F.linear(x, down_w.to(x.dtype))
 
 class Block(nn.Module):
     def __init__(
@@ -1777,6 +1847,7 @@ def main() -> None:
         f"compile:enabled={int(args.compile_enabled)} mode:{compile_mode} "
         f"fullgraph={int(args.compile_fullgraph)}"
     )
+    log0(f"mlp_kernel_mode:{args.mlp_kernel_mode or 'eager'}")
     log0(f"seed:{args.seed}")
     train_loader = build_train_loader(args, rank, world_size, device)
     log0(train_loader.describe())
