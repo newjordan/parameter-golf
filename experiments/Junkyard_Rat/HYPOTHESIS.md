@@ -184,6 +184,29 @@ Keep fixed:
 Decision rule:
 - if it does not buy real steps in a 600s run, it is just complexity
 
+### Phase B runner: `JR-02`
+
+`JR-02` is now scaffolded as the next candidate on top of the `JR-01` coprime winner.
+
+What is implemented:
+- opt-in compile mode hook in `train_gpt.py`
+- dedicated Triton/Inductor candidate runner
+- dedicated local bench for the exact LeakyReLU^2 MLP path
+
+Entry points:
+
+```bash
+python experiments/Junkyard_Rat/bench_triton.py
+```
+
+```bash
+bash experiments/Junkyard_Rat/run_triton_candidate.sh
+```
+
+Interpretation rule:
+- if `bench_triton.py` shows meaningful forward+backward speedup, run `JR-02`
+- if the full run does not improve either step time or final sliding BPB, move it to `losers/`
+
 ### Phase C: artifact path
 
 Objective:

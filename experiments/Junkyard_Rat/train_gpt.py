@@ -109,6 +109,7 @@ class Hyperparameters:
     skip_final_eval = bool(int(os.environ.get("SKIP_FINAL_EVAL", "0")))
     post_ema_diagnostic = bool(int(os.environ.get("POST_EMA_DIAGNOSTIC", "1")))
     compile_enabled = bool(int(os.environ.get("COMPILE_ENABLED", "1")))
+    compile_mode = os.environ.get("COMPILE_MODE", "").strip()
     compile_fullgraph = bool(int(os.environ.get("COMPILE_FULLGRAPH", "1")))
     loader_mode = os.environ.get("LOADER_MODE", "sequential").strip().lower()
     coprime_max_loaded_shards = int(os.environ.get("COPRIME_MAX_LOADED_SHARDS", 4))
@@ -116,10 +117,13 @@ class Hyperparameters:
     coprime_shard_hold_steps = int(os.environ.get("COPRIME_SHARD_HOLD_STEPS", 64))
 
 
-def maybe_compile(fn_or_module, *, enabled: bool, fullgraph: bool):
+def maybe_compile(fn_or_module, *, enabled: bool, fullgraph: bool, mode: str = ""):
     if not enabled:
         return fn_or_module
-    return torch.compile(fn_or_module, dynamic=False, fullgraph=fullgraph)
+    kwargs = dict(dynamic=False, fullgraph=fullgraph)
+    if mode:
+        kwargs["mode"] = mode
+    return torch.compile(fn_or_module, **kwargs)
 
 class TrainNgramTracker:
     """Complementary training: track bigram stats, downweight tokens n-grams can predict."""
@@ -1671,6 +1675,7 @@ def main() -> None:
         base_model,
         enabled=args.compile_enabled,
         fullgraph=args.compile_fullgraph,
+        mode=args.compile_mode,
     )
     model = compiled_model
 
@@ -1767,7 +1772,11 @@ def main() -> None:
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
-    log0(f"compile:enabled={int(args.compile_enabled)} fullgraph={int(args.compile_fullgraph)}")
+    compile_mode = args.compile_mode if args.compile_mode else "default"
+    log0(
+        f"compile:enabled={int(args.compile_enabled)} mode:{compile_mode} "
+        f"fullgraph={int(args.compile_fullgraph)}"
+    )
     log0(f"seed:{args.seed}")
     train_loader = build_train_loader(args, rank, world_size, device)
     log0(train_loader.describe())
