@@ -1,0 +1,35 @@
+{
+  "author": "Frosty40",
+  "github_id": "newjordan",
+  "name": "Rascal: Rat Rod v1 + Coprime Loader",
+  "blurb": "Rat Rod v1 base stack (11-layer flat, Parallel Muon, XSA-all-11, BigramHash 2048, RoPE 16, late QAT) + coprime-stride multi-shard block loader for improved training diversity at zero model cost. Eager MLP, compile=default fullgraph=1. No trigram, no n-gram eval, no MTP. 3-seed mean sliding_window_bpb=1.10955498 (std 0.000428).",
+  "date": "2026-03-30T00:00:00Z",
+  "seed_300": {
+    "sliding_window_bpb": 1.1100,
+    "sliding_window_bpb_exact": 1.10995812,
+    "post_ema_bpb": 1.1334,
+    "steps": 6599,
+    "train_time_s": 600,
+    "step_avg_ms": 90.94
+  },
+  "seed_42": {
+    "sliding_window_bpb": 1.1096,
+    "sliding_window_bpb_exact": 1.10960162,
+    "post_ema_bpb": 1.1332,
+    "steps": 6594,
+    "train_time_s": 600,
+    "step_avg_ms": 91.01
+  },
+  "seed_444": {
+    "sliding_window_bpb": 1.1091,
+    "sliding_window_bpb_exact": 1.10910521,
+    "post_ema_bpb": 1.1326,
+    "steps": 6590,
+    "train_time_s": 600,
+    "step_avg_ms": 91.06
+  },
+  "val_bpb": 1.10955498,
+  "bytes_total": "TBD",
+  "bytes_code": 103437,
+  "hardware": "8xH100 SXM"
+}
