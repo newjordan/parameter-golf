@@ -540,6 +540,10 @@ def _classify_param(name: str) -> str:
         return "embed"
     if "f1_corr_in" in name or "f1_corr_out" in name:
         return "aux"
+    if "qo_bank" in name or "kv_bank" in name:
+        return "attn"
+    if "mlp_up_bank" in name or "mlp_down_bank" in name:
+        return "mlp"
     if ".mlp." in name:
         return "mlp"
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
@@ -687,7 +691,8 @@ def mixed_quantize_int6_gptq(state_dict: dict[str, Tensor], int6_cats: set[str],
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
         elif cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            t_2d = t.reshape(-1, t.shape[-1]) if t.ndim > 2 else t
+            q, s = quantize_int6_per_row(t_2d)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
