@@ -39,6 +39,7 @@ VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-262144}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
 VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-1000}"
 TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-250}"
+EVAL_STRIDE="${EVAL_STRIDE:-0}"
 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-0}"
 RESUME_SWEEP="${RESUME_SWEEP:-1}"
 SUMMARY_PATH="${SUMMARY_PATH:-}"
@@ -227,6 +228,7 @@ run_arm() {
         WARMUP_STEPS="${WARMUP_STEPS}" \
         VAL_LOSS_EVERY="${VAL_LOSS_EVERY}" \
         TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY}" \
+        EVAL_STRIDE="${EVAL_STRIDE}" \
         COMPLEMENT_ALPHA=0 \
         XSA_LAST_N=11 \
         BIGRAM_VOCAB_SIZE=2048 \
@@ -279,6 +281,9 @@ run_arm() {
     local raw_bpb int6_sw_bpb step_ms bytes_total model_params
     raw_bpb="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${log}" | tail -1 || true)"
     int6_sw_bpb="$(grep -oP 'final_int6_sliding_window_exact val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${log}" | tail -1 || true)"
+    if [[ -z "${int6_sw_bpb}" ]]; then
+        int6_sw_bpb="$(grep -oP 'final_int6_roundtrip_exact val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${log}" | tail -1 || true)"
+    fi
     bytes_total="$(grep -oP 'Total submission size int6\+(?:brotli|zstd|zlib): \K[0-9]+' "${log}" | tail -1 || true)"
     step_ms="$(grep -oP 'step_avg:\K[0-9.]+' "${log}" | tail -1 || true)"
     model_params="$(grep -oP 'model_params:\K[0-9]+' "${log}" | tail -1 || true)"
