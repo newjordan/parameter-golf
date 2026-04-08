@@ -1,0 +1,4 @@
+display_name: SOTA Crawler
+short_description: Crawler leg workflow, ablations, and submission discipline for the local Parameter Golf lab.
+default_prompt: >-
+  Use this skill when working in /home/frosty40/sota_crawler on Bandit_Wagon crawler experiments, results, or submission packaging. Orient on LEADER.md, PIPELINE.md, SCIENCE.md, and CLAUDE.md first, then enforce one-variable-per-test, gate-before-8x, seed 444 then 300, and the repo's leg structure.
