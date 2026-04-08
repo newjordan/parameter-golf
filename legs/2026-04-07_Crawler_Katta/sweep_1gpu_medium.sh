@@ -12,6 +12,9 @@ set -euo pipefail
 # Optional:
 #   ITERATIONS=3000 TRAIN_BATCH_TOKENS=262144 MAX_WALLCLOCK_SECONDS=0 \
 #   SEED=444 bash legs/2026-04-07_Crawler_Katta/sweep_1gpu_medium.sh
+# Resume behavior:
+#   RESUME_SWEEP=1 (default) reuses latest summary for this seed and skips done arms.
+#   Set START_AT_ARM=M1_rk2_l2 to force resume at a specific arm.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,9 +40,37 @@ WARMUP_STEPS="${WARMUP_STEPS:-10}"
 VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-1000}"
 TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-250}"
 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-0}"
+RESUME_SWEEP="${RESUME_SWEEP:-1}"
+SUMMARY_PATH="${SUMMARY_PATH:-}"
+START_AT_ARM="${START_AT_ARM:-}"
+STOP_ON_ERROR="${STOP_ON_ERROR:-1}"
+
+# Compile policy:
+# - Euler control keeps previous fast compile defaults.
+# - RK variants default to compile-disabled to avoid torch inductor backward assert on this stack.
+COMPILE_ENABLED_EULER="${COMPILE_ENABLED_EULER:-1}"
+COMPILE_FULLGRAPH_EULER="${COMPILE_FULLGRAPH_EULER:-1}"
+COMPILE_ENABLED_RK="${COMPILE_ENABLED_RK:-0}"
+COMPILE_FULLGRAPH_RK="${COMPILE_FULLGRAPH_RK:-0}"
 
 mkdir -p "${SCRIPT_DIR}/results"
-SUMMARY="${SCRIPT_DIR}/results/summary_1gpu_medium_s${SEED}_$(date +%Y%m%d_%H%M%S).tsv"
+if [[ -n "${SUMMARY_PATH}" ]]; then
+    SUMMARY="${SUMMARY_PATH}"
+elif [[ "${RESUME_SWEEP}" == "1" ]]; then
+    latest_summary="$(ls -1t "${SCRIPT_DIR}/results"/summary_1gpu_medium_s${SEED}_*.tsv 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${latest_summary}" ]]; then
+        SUMMARY="${latest_summary}"
+    else
+        SUMMARY="${SCRIPT_DIR}/results/summary_1gpu_medium_s${SEED}_$(date +%Y%m%d_%H%M%S).tsv"
+    fi
+else
+    SUMMARY="${SCRIPT_DIR}/results/summary_1gpu_medium_s${SEED}_$(date +%Y%m%d_%H%M%S).tsv"
+fi
+echo "Sweep summary file: ${SUMMARY}"
+
+if [[ ! -f "${SUMMARY}" ]]; then
+    echo -e "arm\tdesc\tloops\trope_scales\tsolver\trk_heads\trk_blend\trk_recur\trk_hybrid_mix\trk_battery\tmodel_params\traw_bpb\tint6_sw_bpb\tstep_ms\tbytes\tdelta_vs_ctrl\tstatus\tlog" > "${SUMMARY}"
+fi
 
 if [[ ! -f "${TOKENIZER_PATH}" ]]; then
     echo "ERROR: TOKENIZER_PATH not found: ${TOKENIZER_PATH}"
@@ -109,6 +140,27 @@ if [[ "${ALLOW_TINY_DATASET}" != "1" ]]; then
     fi
 fi
 
+resume_started=1
+if [[ -n "${START_AT_ARM}" ]]; then
+    resume_started=0
+fi
+
+arm_already_done() {
+    local arm_name="$1"
+    if [[ ! -f "${SUMMARY}" ]]; then
+        return 1
+    fi
+    awk -F'\t' -v arm="${arm_name}" '
+        NR == 1 { next }
+        $1 == arm {
+            # Older summary rows do not have status. Treat as done if row exists.
+            if (NF < 17) { ok = 1 }
+            else if ($17 == "OK") { ok = 1 }
+        }
+        END { exit(ok ? 0 : 1) }
+    ' "${SUMMARY}"
+}
+
 run_arm() {
     local arm_name="$1"
     local arm_desc="$2"
@@ -120,7 +172,30 @@ run_arm() {
     local rk_recur="$8"
     local rk_hybrid_mix="$9"
     local rk_battery="${10}"
+    local compile_enabled compile_fullgraph run_rc status
     local log="${SCRIPT_DIR}/results/${arm_name}_1gpu_s${SEED}_$(date +%Y%m%d_%H%M%S).log"
+
+    if [[ "${resume_started}" != "1" ]]; then
+        if [[ "${arm_name}" == "${START_AT_ARM}" ]]; then
+            resume_started=1
+        else
+            echo "  >> ${arm_name}: skipped (waiting for START_AT_ARM=${START_AT_ARM})"
+            return 0
+        fi
+    fi
+
+    if arm_already_done "${arm_name}"; then
+        echo "  >> ${arm_name}: skipped (already completed in ${SUMMARY})"
+        return 0
+    fi
+
+    if [[ "${solver}" == "euler" ]]; then
+        compile_enabled="${COMPILE_ENABLED_EULER}"
+        compile_fullgraph="${COMPILE_FULLGRAPH_EULER}"
+    else
+        compile_enabled="${COMPILE_ENABLED_RK}"
+        compile_fullgraph="${COMPILE_FULLGRAPH_RK}"
+    fi
 
     echo ""
     echo "================================================================"
@@ -130,6 +205,7 @@ run_arm() {
     echo "  rk_battery=${rk_battery}"
     echo "  seed=${SEED} GPUs=${NPROC} steps=${ITERATIONS}"
     echo "  train_batch_tokens=${TRAIN_BATCH_TOKENS} val_batch_size=${VAL_BATCH_SIZE}"
+    echo "  compile_enabled=${compile_enabled} compile_fullgraph=${compile_fullgraph}"
     echo "  log: ${log}"
     echo "================================================================"
     echo ""
@@ -140,6 +216,7 @@ run_arm() {
         TORCHRUN=(python3 -m torch.distributed.run)
     fi
 
+    set +e
     env \
         SEED="${SEED}" \
         MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS}" \
@@ -159,7 +236,8 @@ run_arm() {
         LATE_QAT_THRESHOLD=0 \
         MATRIX_LR=0.03 \
         TORCHDYNAMO_OPTIMIZE_DDP=0 \
-        COMPILE_FULLGRAPH=1 \
+        COMPILE_ENABLED="${compile_enabled}" \
+        COMPILE_FULLGRAPH="${compile_fullgraph}" \
         NGRAM_EVAL_ORDER=0 \
         MODEL_DIM=512 \
         USE_CRAWLER=1 \
@@ -195,6 +273,8 @@ run_arm() {
         TOKENIZER_PATH="${TOKENIZER_PATH}" \
         "${TORCHRUN[@]}" --standalone --nproc_per_node="${NPROC}" "${TRAIN_PY}" \
         2>&1 | tee "${log}"
+    run_rc=${PIPESTATUS[0]}
+    set -e
 
     local raw_bpb int6_sw_bpb step_ms bytes_total model_params
     raw_bpb="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${log}" | tail -1 || true)"
@@ -205,12 +285,23 @@ run_arm() {
 
     echo ""
     echo "  >> ${arm_name}: params=${model_params:-?} raw=${raw_bpb:-?} int6_sw=${int6_sw_bpb:-?} step_ms=${step_ms:-?} bytes=${bytes_total:-?}"
+    echo "  >> ${arm_name}: status=$([[ "${run_rc}" -eq 0 ]] && echo OK || echo FAIL)"
     echo ""
 
-    if [[ ! -f "${SUMMARY}" ]]; then
-        echo -e "arm\tdesc\tloops\trope_scales\tsolver\trk_heads\trk_blend\trk_recur\trk_hybrid_mix\trk_battery\tmodel_params\traw_bpb\tint6_sw_bpb\tstep_ms\tbytes\tdelta_vs_ctrl" > "${SUMMARY}"
+    if [[ "${run_rc}" -eq 0 ]]; then
+        status="OK"
+    else
+        status="FAIL"
     fi
-    echo -e "${arm_name}\t${arm_desc}\t${loops}\t${rope_scales}\t${solver}\t${rk_heads}\t${rk_blend}\t${rk_recur}\t${rk_hybrid_mix}\t${rk_battery}\t${model_params:-?}\t${raw_bpb:-?}\t${int6_sw_bpb:-?}\t${step_ms:-?}\t${bytes_total:-?}\t?" >> "${SUMMARY}"
+    echo -e "${arm_name}\t${arm_desc}\t${loops}\t${rope_scales}\t${solver}\t${rk_heads}\t${rk_blend}\t${rk_recur}\t${rk_hybrid_mix}\t${rk_battery}\t${model_params:-?}\t${raw_bpb:-?}\t${int6_sw_bpb:-?}\t${step_ms:-?}\t${bytes_total:-?}\t?\t${status}\t${log}" >> "${SUMMARY}"
+
+    if [[ "${run_rc}" -ne 0 ]]; then
+        if [[ "${STOP_ON_ERROR}" == "1" ]]; then
+            echo "Stopping sweep due to failure in ${arm_name}. Set STOP_ON_ERROR=0 to continue."
+            exit "${run_rc}"
+        fi
+        echo "Continuing sweep after failure in ${arm_name} because STOP_ON_ERROR=${STOP_ON_ERROR}."
+    fi
 }
 
 # M0: control
