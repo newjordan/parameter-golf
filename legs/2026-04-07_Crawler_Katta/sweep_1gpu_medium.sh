@@ -25,7 +25,7 @@ NPROC="${NPROC_PER_NODE:-1}"
 TRAIN_PY="${SCRIPT_DIR}/train_gpt_brotli.py"
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${REPO_ROOT}/data/tokenizers/fineweb_1024_bpe.model}"
-MIN_TRAIN_SHARDS="${MIN_TRAIN_SHARDS:-16}"
+MIN_TRAIN_TOKENS="${MIN_TRAIN_TOKENS:-50000000}"
 MIN_VAL_TOKENS="${MIN_VAL_TOKENS:-10000000}"
 ALLOW_TINY_DATASET="${ALLOW_TINY_DATASET:-0}"
 
@@ -66,30 +66,39 @@ if [[ "${#val_shards[@]}" -eq 0 ]]; then
     exit 1
 fi
 
-val_tokens_total="$(
-python3 - "${val_shards[@]}" <<'PY'
+dataset_stats="$(
+python3 - "${train_shards[@]}" --SEP-- "${val_shards[@]}" <<'PY'
 import struct
 import sys
-total = 0
-for p in sys.argv[1:]:
-    with open(p, "rb") as f:
-        hdr = f.read(12)
-    if len(hdr) != 12:
-        raise SystemExit(f"short header: {p}")
-    magic, version, n_tok = struct.unpack("<iii", hdr)
-    if magic != 20240520 or version != 1:
-        raise SystemExit(f"bad shard header: {p} (magic={magic} version={version})")
-    total += n_tok
-print(total)
+def count_tokens(paths):
+    total = 0
+    for p in paths:
+        with open(p, "rb") as f:
+            hdr = f.read(12)
+        if len(hdr) != 12:
+            raise SystemExit(f"short header: {p}")
+        magic, version, n_tok = struct.unpack("<iii", hdr)
+        if magic != 20240520 or version != 1:
+            raise SystemExit(f"bad shard header: {p} (magic={magic} version={version})")
+        total += n_tok
+    return total
+
+args = sys.argv[1:]
+sep = args.index("--SEP--")
+train = args[:sep]
+val = args[sep + 1 :]
+print(count_tokens(train), count_tokens(val))
 PY
 )"
 
+read -r train_tokens_total val_tokens_total <<<"${dataset_stats}"
+
 echo "Data preflight: DATA_PATH=${DATA_PATH}"
-echo "Data preflight: train_shards=${#train_shards[@]} val_shards=${#val_shards[@]} val_tokens=${val_tokens_total}"
+echo "Data preflight: train_shards=${#train_shards[@]} val_shards=${#val_shards[@]} train_tokens=${train_tokens_total} val_tokens=${val_tokens_total}"
 
 if [[ "${ALLOW_TINY_DATASET}" != "1" ]]; then
-    if [[ "${#train_shards[@]}" -lt "${MIN_TRAIN_SHARDS}" ]]; then
-        echo "ERROR: train_shards=${#train_shards[@]} < MIN_TRAIN_SHARDS=${MIN_TRAIN_SHARDS}."
+    if [[ "${train_tokens_total}" -lt "${MIN_TRAIN_TOKENS}" ]]; then
+        echo "ERROR: train_tokens=${train_tokens_total} < MIN_TRAIN_TOKENS=${MIN_TRAIN_TOKENS}."
         echo "Set DATA_PATH to full dataset or override with ALLOW_TINY_DATASET=1."
         exit 1
     fi
