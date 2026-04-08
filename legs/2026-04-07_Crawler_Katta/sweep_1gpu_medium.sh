@@ -23,6 +23,11 @@ export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
 SEED="${SEED:-444}"
 NPROC="${NPROC_PER_NODE:-1}"
 TRAIN_PY="${SCRIPT_DIR}/train_gpt_brotli.py"
+DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${REPO_ROOT}/data/tokenizers/fineweb_1024_bpe.model}"
+MIN_TRAIN_SHARDS="${MIN_TRAIN_SHARDS:-16}"
+MIN_VAL_TOKENS="${MIN_VAL_TOKENS:-10000000}"
+ALLOW_TINY_DATASET="${ALLOW_TINY_DATASET:-0}"
 
 # Medium-sweep defaults for 1xGPU signal hunting.
 ITERATIONS="${ITERATIONS:-3000}"
@@ -35,6 +40,65 @@ MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-0}"
 
 mkdir -p "${SCRIPT_DIR}/results"
 SUMMARY="${SCRIPT_DIR}/results/summary_1gpu_medium_s${SEED}_$(date +%Y%m%d_%H%M%S).tsv"
+
+if [[ ! -f "${TOKENIZER_PATH}" ]]; then
+    echo "ERROR: TOKENIZER_PATH not found: ${TOKENIZER_PATH}"
+    exit 1
+fi
+
+if [[ ! -d "${DATA_PATH}" ]]; then
+    echo "ERROR: DATA_PATH not found: ${DATA_PATH}"
+    exit 1
+fi
+
+shopt -s nullglob
+train_shards=( "${DATA_PATH}"/fineweb_train_*.bin )
+val_shards=( "${DATA_PATH}"/fineweb_val_*.bin )
+shopt -u nullglob
+
+if [[ "${#train_shards[@]}" -eq 0 ]]; then
+    echo "ERROR: no train shards at ${DATA_PATH}/fineweb_train_*.bin"
+    exit 1
+fi
+
+if [[ "${#val_shards[@]}" -eq 0 ]]; then
+    echo "ERROR: no val shards at ${DATA_PATH}/fineweb_val_*.bin"
+    exit 1
+fi
+
+val_tokens_total="$(
+python3 - "${val_shards[@]}" <<'PY'
+import struct
+import sys
+total = 0
+for p in sys.argv[1:]:
+    with open(p, "rb") as f:
+        hdr = f.read(12)
+    if len(hdr) != 12:
+        raise SystemExit(f"short header: {p}")
+    magic, version, n_tok = struct.unpack("<iii", hdr)
+    if magic != 20240520 or version != 1:
+        raise SystemExit(f"bad shard header: {p} (magic={magic} version={version})")
+    total += n_tok
+print(total)
+PY
+)"
+
+echo "Data preflight: DATA_PATH=${DATA_PATH}"
+echo "Data preflight: train_shards=${#train_shards[@]} val_shards=${#val_shards[@]} val_tokens=${val_tokens_total}"
+
+if [[ "${ALLOW_TINY_DATASET}" != "1" ]]; then
+    if [[ "${#train_shards[@]}" -lt "${MIN_TRAIN_SHARDS}" ]]; then
+        echo "ERROR: train_shards=${#train_shards[@]} < MIN_TRAIN_SHARDS=${MIN_TRAIN_SHARDS}."
+        echo "Set DATA_PATH to full dataset or override with ALLOW_TINY_DATASET=1."
+        exit 1
+    fi
+    if [[ "${val_tokens_total}" -lt "${MIN_VAL_TOKENS}" ]]; then
+        echo "ERROR: val_tokens=${val_tokens_total} < MIN_VAL_TOKENS=${MIN_VAL_TOKENS}."
+        echo "Set DATA_PATH to full dataset or override with ALLOW_TINY_DATASET=1."
+        exit 1
+    fi
+fi
 
 run_arm() {
     local arm_name="$1"
@@ -118,6 +182,8 @@ run_arm() {
         CRAWLER_RK_RECUR_GAIN_INIT="${rk_recur}" \
         CRAWLER_RK_HYBRID_MIX_INIT="${rk_hybrid_mix}" \
         CRAWLER_RK_BATTERY="${rk_battery}" \
+        DATA_PATH="${DATA_PATH}" \
+        TOKENIZER_PATH="${TOKENIZER_PATH}" \
         "${TORCHRUN[@]}" --standalone --nproc_per_node="${NPROC}" "${TRAIN_PY}" \
         2>&1 | tee "${log}"
 
