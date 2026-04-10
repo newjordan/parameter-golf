@@ -20,6 +20,14 @@
     "bytes_total": 0,
     "train_time_s": 600
   },
+  "seed_4": {
+    "val_bpb": 0.0000,
+    "val_bpb_exact": 0.00000000,
+    "int6_sw_bpb": 0.00000000,
+    "steps": 0,
+    "bytes_total": 0,
+    "train_time_s": 600
+  },
   "val_bpb": 0.0000,
   "bytes_total": 0,
   "bytes_code": 0,

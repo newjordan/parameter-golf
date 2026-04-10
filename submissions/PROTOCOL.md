@@ -16,9 +16,10 @@ Never open a PR from origin. Never touch an already-merged PR.**
 
 1. Full 8×H100 run complete (seed=444), logs saved
 2. Confirmation run complete (seed=300), logs saved
-3. Model beats the current leader BPB on both seeds (check LEADER.md)
-4. `final_model.pt` and `final_model.int6.ptz` saved off pod with unique names
-5. All three training logs pulled from pod to this machine
+3. Third required run complete (seed=4), logs saved
+4. Model beats the current leader BPB on all three seeds (check LEADER.md)
+5. `final_model.pt` and `final_model.int6.ptz` saved off pod with unique names
+6. All three training logs pulled from pod to this machine
 
 If any of these are missing: STOP. Do not submit a partial.
 
@@ -28,19 +29,19 @@ If any of these are missing: STOP. Do not submit a partial.
 
 Records path: `records/track_10min_16mb/YYYY-MM-DD_<Name>_8xH100/`
 
-Required files (ALL four must exist before Step 2):
+Required files (ALL must exist before Step 2):
 ```
 records/track_10min_16mb/YYYY-MM-DD_<Name>_8xH100/
   submission.json        ← see template: submissions/templates/submission_neural.json
   train_gpt.py           ← the EXACT file that ran (vault copy for neural)
   train_seed444.log      ← full log from seed=444 run
   train_seed300.log      ← full log from seed=300 run
+  train_seed4.log        ← full log from seed=4 run
   README.md              ← results table + reproduce instructions
 ```
 
 Optional (add if you have them):
 ```
-  train_seed42.log       ← third seed if run
   gate_seed444.log       ← 1-GPU gate log
 ```
 
@@ -70,8 +71,15 @@ Crawler: copy train_gpt.py from crawler/<champion_leg>/
     "bytes_total": <int from log>,
     "train_time_s": 600
   },
+  "seed_4": {
+    "val_bpb": <round to 4 decimal>,
+    "val_bpb_exact": <full precision from log>,
+    "steps": <int>,
+    "bytes_total": <int from log>,
+    "train_time_s": 600
+  },
   "val_bpb": <mean of all seeds, 4 decimal>,
-  "bytes_total": <MAX bytes_total across seeds>,
+  "bytes_total": <MAX bytes_total across seeds (444/300/4)>,
   "bytes_code": <len(train_gpt.py.encode('utf-8')) — check log output>,
   "hardware": "8xH100 SXM"
 }
@@ -141,8 +149,7 @@ gh pr create \
 ```
 
 Edit the body template BEFORE running this. Replace all `<placeholders>`.
-If `seed_42` exists in `submission.json`, include seed 42 in the PR Results table
-(not only seeds 444 and 300).
+Include seed 4 in the PR Results table (seeds 444, 300, and 4 are required).
 
 PR title format: `<ModelName> — <exact_bpb> val_bpb (seed 444)`
 Example: `Rascal III — 1.10812345 val_bpb (seed 444)`

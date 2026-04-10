@@ -4,13 +4,13 @@
 
 ## Results
 
-Include all submitted seeds in this table (usually `444`, `300`, and `42`).
+Include all submitted seeds in this table (`444`, `300`, and `4`).
 
 | Seed | val_bpb (sliding window) | Steps | Size |
 |------|--------------------------|-------|------|
 | 444  | <val_bpb_exact>          | <steps> | <bytes_total> B |
 | 300  | <val_bpb_exact>          | <steps> | <bytes_total> B |
-| 42   | <val_bpb_exact>          | <steps> | <bytes_total> B |
+| 4    | <val_bpb_exact>          | <steps> | <bytes_total> B |
 | **mean** | **<mean_bpb>**       |       | **<max_bytes> B** |
 
 Hardware: 8×H100 SXM · 600s wallclock · `bytes_code`: <bytes_code>

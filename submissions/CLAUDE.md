@@ -7,7 +7,7 @@ This is the highest-stakes operation in the lab. Slow down. Verify everything.
 
 ## Hard stops — check BEFORE doing anything
 
-1. The run must be DONE. Both seeds (444 + 300) complete. Logs saved locally.
+1. The run must be DONE. All three seeds (444 + 300 + 4) complete. Logs saved locally.
 2. The model must beat the current LEADER.md score.
 3. Records prep and validate must be complete on TEST_LAB (not in the middle of an experiment).
 4. A merged PR MUST NEVER be touched again. Check `gh pr list --repo openai/parameter-golf` first.
@@ -39,12 +39,13 @@ This keeps submission PRs clean: one records folder, no rolling TEST_LAB history
 
 `origin` NEVER gets submission branches. `fork1` ONLY gets submission branches.
 
-## Required files in records dir (all four, no exceptions)
+## Required files in records dir (all required, no exceptions)
 
 - `submission.json` — fill from templates/submission_neural.json or submission_crawler.json
 - `train_gpt.py` — EXACT file that ran (vault copy for neural; champion leg copy for crawler)
 - `train_seed444.log` — full log
 - `train_seed300.log` — full log
+- `train_seed4.log` — full log
 - `README.md` — results table + reproduce instructions
 
 ## submission.json — critical fields
@@ -53,7 +54,7 @@ This keeps submission PRs clean: one records folder, no rolling TEST_LAB history
 - `bytes_code` must match `Code size:` line in training log
 - `val_bpb_exact` must match `final_sliding_window_exact val_bpb=` in log
 - `date` is the run date, not submission date
-- If `seed_42` exists, include seed 42 in both README and PR Results tables
+- Include seed 4 in both README and PR Results tables
 
 ## What killed past PRs
 

@@ -32,20 +32,15 @@ for f in submission.json train_gpt.py README.md; do
     fi
 done
 
-# At least one seed log required; seed 444 + 300 strongly recommended
-LOGS_FOUND=0
-for seed in 444 300 42; do
+# Required seed logs
+for seed in 444 300 4; do
     log="${RECORDS_DIR}/train_seed${seed}.log"
     if [[ -f "${log}" ]]; then
         ok "train_seed${seed}.log exists"
-        LOGS_FOUND=$((LOGS_FOUND+1))
     else
-        if [[ "${seed}" == "444" || "${seed}" == "300" ]]; then
-            fail "train_seed${seed}.log MISSING (required)"
-        fi
+        fail "train_seed${seed}.log MISSING (required)"
     fi
 done
-[[ ${LOGS_FOUND} -ge 2 ]] || fail "Need at least seed=444 and seed=300 logs"
 
 echo ""
 
@@ -93,7 +88,7 @@ else
     if [[ "${CODE_BYTES}" -gt 0 ]]; then
         # Check if log confirms the code size
         LOG_CODE=""
-        for seed in 444 300 42; do
+        for seed in 444 300 4; do
             logfile="${RECORDS_DIR}/train_seed${seed}.log"
             if [[ -f "${logfile}" ]]; then
                 LOG_CODE=$(grep -oP 'Code size:\s*\K[0-9]+' "${logfile}" | head -1 || true)
@@ -111,8 +106,18 @@ else
         fi
     fi
 
+    # Required per-seed objects
+    for seed in 444 300 4; do
+        BLOCK_OK=$(python3 -c "import json; d=json.load(open('${JSON}')); print('yes' if isinstance(d.get('seed_${seed}'), dict) else 'no')" 2>/dev/null || echo "no")
+        if [[ "${BLOCK_OK}" == "yes" ]]; then
+            ok "seed_${seed} block exists"
+        else
+            fail "seed_${seed} block missing in submission.json"
+        fi
+    done
+
     # val_bpb_exact cross-check with log
-    for seed in 444 300; do
+    for seed in 444 300 4; do
         field="seed_${seed}"
         EXACT=$(python3 -c "import json; d=json.load(open('${JSON}')); s=d.get('${field}',{}); print(s.get('val_bpb_exact','MISSING'))" 2>/dev/null || echo "MISSING")
         logfile="${RECORDS_DIR}/train_seed${seed}.log"
