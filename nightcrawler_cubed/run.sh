@@ -17,6 +17,19 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 export PYTHONPATH="${REPO_ROOT}/flash-attention/hopper:${PYTHONPATH:-}"
+TORCH_LIB="$(python3 - <<'PYEOF'
+import os
+try:
+    import torch
+except Exception:
+    print("")
+else:
+    print(os.path.join(os.path.dirname(torch.__file__), "lib"))
+PYEOF
+)"
+if [[ -n "${TORCH_LIB}" && -d "${TORCH_LIB}" ]]; then
+    export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+fi
 
 SEED="${SEED:-444}"
 NPROC="${NPROC_PER_NODE:-8}"

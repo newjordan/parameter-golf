@@ -15,7 +15,7 @@ export PIP_ROOT_USER_ACTION=ignore   # suppress "running as root" pip warning
 # =============================================================================
 
 REPO_URL="https://github.com/newjordan/parameter-golf.git"
-BRANCH="TEST_LAB"
+BRANCH="${BRANCH:-TEST_LAB}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-80}"
 DATASET_VARIANT="${DATASET_VARIANT:-sp1024}"
 # Auto-detect repo root from script location; fall back for curl-pipe scenario
@@ -66,6 +66,13 @@ echo "[2/6] Checking base environment..."
 python3 --version || { echo "FATAL: python3 not found"; exit 1; }
 python3 -c "import torch; print(f'  PyTorch {torch.__version__}  CUDA {torch.version.cuda}')" \
     || { echo "FATAL: PyTorch not installed in system Python"; exit 1; }
+TORCH_LIB="$(python3 - <<'PYEOF'
+import os
+import torch
+print(os.path.join(os.path.dirname(torch.__file__), "lib"))
+PYEOF
+)"
+export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
 
 GPU_COUNT=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
 if [ "$GPU_COUNT" -eq 0 ]; then
