@@ -35,12 +35,23 @@ LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ:-0}"
 GPTQ_CAL_SAMPLES="${GPTQ_CAL_SAMPLES:-256}"
 GPTQ_CAL_SEQ_LEN="${GPTQ_CAL_SEQ_LEN:-2048}"
 RUNTIME_PYMINIFY="${RUNTIME_PYMINIFY:-0}"
-PYMINIFY_MODE="${PYMINIFY_MODE:-aggressive}"    # safe|aggressive
+PYMINIFY_MODE="${PYMINIFY_MODE:-aggressive}"    # safe|aggressive|aggressive_globals
+SIZE_TARGET_BYTES="${SIZE_TARGET_BYTES:-${LEGAL_SIZE_LIMIT}}"
+SELECTIVE_PRUNE_ENABLE="${SELECTIVE_PRUNE_ENABLE:-0}"
+SELECTIVE_PRUNE_FACTOR="${SELECTIVE_PRUNE_FACTOR:-8}"
+SELECTIVE_PRUNE_RESERVE_BYTES="${SELECTIVE_PRUNE_RESERVE_BYTES:-0}"
+SELECTIVE_PRUNE_MAX_VALUES="${SELECTIVE_PRUNE_MAX_VALUES:-0}"
+PRESERVE_SEED_ALIAS="${PRESERVE_SEED_ALIAS:-1}"
 
-mkdir -p "${SCRIPT_DIR}/logs"
+RESULTS_DIR="${SCRIPT_DIR}/results"
+BACKUP_DIR="${RESULTS_DIR}/backups"
+mkdir -p "${SCRIPT_DIR}/logs" "${RESULTS_DIR}" "${BACKUP_DIR}"
 LOG_STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_TS="${SCRIPT_DIR}/logs/train_seed${SEED}_${LOG_STAMP}.log"
-LOG="${SCRIPT_DIR}/train_seed${SEED}.log"
+LOG_RESULTS="${RESULTS_DIR}/train_seed${SEED}_${LOG_STAMP}.log"
+LOG_ALIAS="${SCRIPT_DIR}/train_seed${SEED}.log"
+METRICS_TS="${RESULTS_DIR}/metrics_seed${SEED}_${LOG_STAMP}.tsv"
+METRICS_ALIAS="${SCRIPT_DIR}/metrics_seed${SEED}.tsv"
 
 if command -v torchrun >/dev/null 2>&1; then
     TORCHRUN=(torchrun)
@@ -121,8 +132,17 @@ elif mode == "aggressive":
         rename_globals=False,
         hoist_literals=True,
     )
+elif mode == "aggressive_globals":
+    options = dict(
+        remove_literal_statements=True,
+        remove_asserts=True,
+        remove_debug=True,
+        rename_locals=True,
+        rename_globals=True,
+        hoist_literals=True,
+    )
 else:
-    raise SystemExit(f"  ERROR: PYMINIFY_MODE must be safe|aggressive, got: {mode}")
+    raise SystemExit(f"  ERROR: PYMINIFY_MODE must be safe|aggressive|aggressive_globals, got: {mode}")
 
 minified = python_minifier.minify(source, **options)
 compile(minified, str(dst_path), "exec")
@@ -143,6 +163,8 @@ echo "  NUM_FLAT_LAYERS=${NUM_FLAT_LAYERS} NUM_CRAWLER_LAYERS=${NUM_CRAWLER_LAYE
 echo "  CRAWLER_QUANT_INT8=${CRAWLER_QUANT_INT8}  (0=smaller artifacts, 1=higher risk for >16MB)"
 echo "  SKIP_GPTQ=${SKIP_GPTQ} LOOP_AWARE_GPTQ=${LOOP_AWARE_GPTQ} GPTQ_CAL_SAMPLES=${GPTQ_CAL_SAMPLES}"
 echo "  RUNTIME_PYMINIFY=${RUNTIME_PYMINIFY} PYMINIFY_MODE=${PYMINIFY_MODE}"
+echo "  SIZE_TARGET_BYTES=${SIZE_TARGET_BYTES} SELECTIVE_PRUNE_ENABLE=${SELECTIVE_PRUNE_ENABLE} SELECTIVE_PRUNE_FACTOR=${SELECTIVE_PRUNE_FACTOR}"
+echo "  PRESERVE_SEED_ALIAS=${PRESERVE_SEED_ALIAS}"
 echo "  train_py=${TRAIN_PY_RUN}"
 echo "  log: ${LOG_TS}"
 echo "============================================"
@@ -177,6 +199,11 @@ env \
     LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ}" \
     GPTQ_CAL_SAMPLES="${GPTQ_CAL_SAMPLES}" \
     GPTQ_CAL_SEQ_LEN="${GPTQ_CAL_SEQ_LEN}" \
+    SIZE_TARGET_BYTES="${SIZE_TARGET_BYTES}" \
+    SELECTIVE_PRUNE_ENABLE="${SELECTIVE_PRUNE_ENABLE}" \
+    SELECTIVE_PRUNE_FACTOR="${SELECTIVE_PRUNE_FACTOR}" \
+    SELECTIVE_PRUNE_RESERVE_BYTES="${SELECTIVE_PRUNE_RESERVE_BYTES}" \
+    SELECTIVE_PRUNE_MAX_VALUES="${SELECTIVE_PRUNE_MAX_VALUES}" \
     MLP_LEAKY_SLOPE=0.5 \
     CRAWLER_MLP_LEAKY_SLOPE=0.5 \
     CRAWLER_MLP_CHOKE_DIM=0 \
@@ -193,22 +220,29 @@ env \
     "${TORCHRUN[@]}" --standalone --nproc_per_node="${NPROC}" "${TRAIN_PY_RUN}" \
     2>&1 | tee "${LOG_TS}"
 
-cp -f "${LOG_TS}" "${LOG}"
+cp -f "${LOG_TS}" "${LOG_RESULTS}"
+if [[ "${PRESERVE_SEED_ALIAS}" == "1" ]]; then
+    if [[ -f "${LOG_ALIAS}" ]]; then
+        PREV_LOG_STAMP="$(date -r "${LOG_ALIAS}" +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+        cp -f "${LOG_ALIAS}" "${BACKUP_DIR}/train_seed${SEED}_${PREV_LOG_STAMP}_${LOG_STAMP}_prev.log"
+    fi
+    cp -f "${LOG_TS}" "${LOG_ALIAS}"
+fi
 
 # ----------------------------------------------------------------
 # Metrics extraction
 # ----------------------------------------------------------------
-raw_bpb="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${LOG}" | tail -1 || true)"
-int6_sw_bpb="$(grep -oP 'final_int6_sliding_window_exact val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${LOG}" | tail -1 || true)"
-bytes_total="$(grep -oP 'Total submission size int6\+(?:zstd|zlib|brotli): \K[0-9]+' "${LOG}" | tail -1 || true)"
-code_bytes="$(grep -oP 'Code size: \K[0-9]+' "${LOG}" | tail -1 || true)"
-step_ms="$(grep -oP 'step_avg:\K[0-9.]+' "${LOG}" | tail -1 || true)"
-model_params="$(grep -oP 'model_params:\K[0-9]+' "${LOG}" | tail -1 || true)"
-steps="$(grep -oP 'stopping_early:.*step:\K[0-9]+' "${LOG}" | tail -1 || true)"
+raw_bpb="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${LOG_TS}" | tail -1 || true)"
+int6_sw_bpb="$(grep -oP 'final_int6_sliding_window_exact val_loss:[0-9.]+ val_bpb:\K[0-9.]+' "${LOG_TS}" | tail -1 || true)"
+bytes_total="$(grep -oP 'Total submission size int6\+(?:zstd|zlib|brotli): \K[0-9]+' "${LOG_TS}" | tail -1 || true)"
+code_bytes="$(grep -oP 'Code size: \K[0-9]+' "${LOG_TS}" | tail -1 || true)"
+step_ms="$(grep -oP 'step_avg:\K[0-9.]+' "${LOG_TS}" | tail -1 || true)"
+model_params="$(grep -oP 'model_params:\K[0-9]+' "${LOG_TS}" | tail -1 || true)"
+steps="$(grep -oP 'stopping_early:.*step:\K[0-9]+' "${LOG_TS}" | tail -1 || true)"
 if [[ -z "${steps}" ]]; then
-    steps="$(grep -oP 'step:\K[0-9]+(?=/[0-9]+ val_loss:)' "${LOG}" | tail -1 || true)"
+    steps="$(grep -oP 'step:\K[0-9]+(?=/[0-9]+ val_loss:)' "${LOG_TS}" | tail -1 || true)"
 fi
-train_time_ms="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:[0-9.]+ train_time:\K[0-9]+' "${LOG}" | tail -1 || true)"
+train_time_ms="$(grep -oP 'step:[0-9]+/[0-9]+ val_loss:[0-9.]+ val_bpb:[0-9.]+ train_time:\K[0-9]+' "${LOG_TS}" | tail -1 || true)"
 if [[ -n "${train_time_ms}" ]]; then
     train_time_s=$((train_time_ms / 1000))
 else
@@ -236,24 +270,57 @@ echo "  train_time_s:  ${train_time_s}"
 echo "  bytes_total:   ${bytes_total:-?}  (limit ${LEGAL_SIZE_LIMIT})"
 echo "  bytes_code:    ${code_bytes:-?}"
 echo "  artifact_legal:${artifact_ok}"
-echo "  log:           ${LOG}"
+echo "  log:           ${LOG_RESULTS}"
 echo "============================================"
 
-METRICS_TSV="${SCRIPT_DIR}/metrics_seed${SEED}.tsv"
 {
     echo -e "seed\tmodel_params\traw_bpb\tint6_sw_bpb\tsteps\tstep_ms\ttrain_time_s\tbytes_total\tbytes_code\tartifact_legal\tlog"
-    echo -e "${SEED}\t${model_params:-?}\t${raw_bpb:-?}\t${int6_sw_bpb:-?}\t${steps:-?}\t${step_ms:-?}\t${train_time_s}\t${bytes_total:-?}\t${code_bytes:-?}\t${artifact_ok}\t${LOG}"
-} > "${METRICS_TSV}"
+    echo -e "${SEED}\t${model_params:-?}\t${raw_bpb:-?}\t${int6_sw_bpb:-?}\t${steps:-?}\t${step_ms:-?}\t${train_time_s}\t${bytes_total:-?}\t${code_bytes:-?}\t${artifact_ok}\t${LOG_RESULTS}"
+} > "${METRICS_TS}"
+if [[ "${PRESERVE_SEED_ALIAS}" == "1" ]]; then
+    if [[ -f "${METRICS_ALIAS}" ]]; then
+        PREV_METRICS_STAMP="$(date -r "${METRICS_ALIAS}" +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+        cp -f "${METRICS_ALIAS}" "${BACKUP_DIR}/metrics_seed${SEED}_${PREV_METRICS_STAMP}_${LOG_STAMP}_prev.tsv"
+    fi
+    cp -f "${METRICS_TS}" "${METRICS_ALIAS}"
+fi
 
 # Keep uniquely named artifacts for submission packaging.
 if [[ -f "${REPO_ROOT}/final_model.pt" ]]; then
-    cp -f "${REPO_ROOT}/final_model.pt" "${SCRIPT_DIR}/final_model_seed${SEED}.pt"
+    ARTIFACT_ALIAS="${SCRIPT_DIR}/final_model_seed${SEED}.pt"
+    ARTIFACT_TS="${SCRIPT_DIR}/final_model_seed${SEED}_${LOG_STAMP}.pt"
+    cp -f "${REPO_ROOT}/final_model.pt" "${ARTIFACT_TS}"
+    if [[ "${PRESERVE_SEED_ALIAS}" == "1" ]]; then
+        if [[ -f "${ARTIFACT_ALIAS}" ]]; then
+            PREV_ARTIFACT_STAMP="$(date -r "${ARTIFACT_ALIAS}" +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+            cp -f "${ARTIFACT_ALIAS}" "${BACKUP_DIR}/final_model_seed${SEED}_${PREV_ARTIFACT_STAMP}_${LOG_STAMP}_prev.pt"
+        fi
+        cp -f "${REPO_ROOT}/final_model.pt" "${ARTIFACT_ALIAS}"
+    fi
 fi
 if [[ -f "${REPO_ROOT}/final_model.int6.ptz" ]]; then
-    cp -f "${REPO_ROOT}/final_model.int6.ptz" "${SCRIPT_DIR}/final_model_seed${SEED}.int6.ptz"
+    ARTIFACT_ALIAS="${SCRIPT_DIR}/final_model_seed${SEED}.int6.ptz"
+    ARTIFACT_TS="${SCRIPT_DIR}/final_model_seed${SEED}_${LOG_STAMP}.int6.ptz"
+    cp -f "${REPO_ROOT}/final_model.int6.ptz" "${ARTIFACT_TS}"
+    if [[ "${PRESERVE_SEED_ALIAS}" == "1" ]]; then
+        if [[ -f "${ARTIFACT_ALIAS}" ]]; then
+            PREV_ARTIFACT_STAMP="$(date -r "${ARTIFACT_ALIAS}" +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+            cp -f "${ARTIFACT_ALIAS}" "${BACKUP_DIR}/final_model_seed${SEED}_${PREV_ARTIFACT_STAMP}_${LOG_STAMP}_prev.int6.ptz"
+        fi
+        cp -f "${REPO_ROOT}/final_model.int6.ptz" "${ARTIFACT_ALIAS}"
+    fi
 fi
 if [[ -f "${REPO_ROOT}/final_model.int8.ptz" ]]; then
-    cp -f "${REPO_ROOT}/final_model.int8.ptz" "${SCRIPT_DIR}/final_model_seed${SEED}.int8.ptz"
+    ARTIFACT_ALIAS="${SCRIPT_DIR}/final_model_seed${SEED}.int8.ptz"
+    ARTIFACT_TS="${SCRIPT_DIR}/final_model_seed${SEED}_${LOG_STAMP}.int8.ptz"
+    cp -f "${REPO_ROOT}/final_model.int8.ptz" "${ARTIFACT_TS}"
+    if [[ "${PRESERVE_SEED_ALIAS}" == "1" ]]; then
+        if [[ -f "${ARTIFACT_ALIAS}" ]]; then
+            PREV_ARTIFACT_STAMP="$(date -r "${ARTIFACT_ALIAS}" +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+            cp -f "${ARTIFACT_ALIAS}" "${BACKUP_DIR}/final_model_seed${SEED}_${PREV_ARTIFACT_STAMP}_${LOG_STAMP}_prev.int8.ptz"
+        fi
+        cp -f "${REPO_ROOT}/final_model.int8.ptz" "${ARTIFACT_ALIAS}"
+    fi
 fi
 
 if [[ "${ENFORCE_SIZE_LIMIT}" == "1" && "${artifact_ok}" == "no" ]]; then

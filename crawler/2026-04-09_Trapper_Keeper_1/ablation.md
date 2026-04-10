@@ -58,6 +58,33 @@ Gate: artifact <= 16,000,000 bytes — NO (missed by 65,029 bytes)
 Structured metrics snapshot:
 `crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_055647_recovered.tsv`
 
+## Recovered disconnected run (8xH100, 600s, seed=444, 7F+3C, loop-aware GPTQ)
+
+Status: [x] QUALITY PASS — NEAR-MISS SIZE FAIL
+
+Command:
+`RUNTIME_PYMINIFY=1 PYMINIFY_MODE=aggressive LOOP_AWARE_GPTQ=1 SKIP_GPTQ=0 SEED=444 NPROC_PER_NODE=8 bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli_gptq_pyminify.sh`
+
+Recovered log:
+`crawler/2026-04-09_Trapper_Keeper_1/results/train_seed444_20260410_065634_recovered_from_chat.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1530 |
+| int6_sw_bpb | 1.13417607 |
+| step_avg_ms | 150.08 |
+| steps | 3,998 |
+| bytes_total | 16,032,878 (OVER 16MB cap by 32,878 bytes) |
+| bytes_code | 65,410 |
+| artifact_legal | NO |
+
+Gate: beat 1.13867894 int6_sw_bpb — YES (-0.00450)
+Gate: artifact <= 16,000,000 bytes — NO (missed by 32,878 bytes)
+
+Structured metrics snapshot:
+`crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_065634_recovered_from_chat.tsv`
+
 ## Safe vs Aggressive gate (4xGPU, 300s wallclock)
 
 | Arm | Config | steps_in_300s | step_ms | val_bpb | Verdict |

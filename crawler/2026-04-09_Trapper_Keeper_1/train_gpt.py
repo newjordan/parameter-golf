@@ -1884,6 +1884,59 @@ def mixed_quantize_int6_gptq(state_dict: dict[str, Tensor], int6_cats: set[str],
             meta[name] = {"type": "int8"}
     print(f"gptq_quantize: {gptq_count} GPTQ layers, {naive_count} naive layers", flush=True)
     return result, meta
+def _compress_quant_payload(payload: bytes) -> bytes:
+    if _COMPRESSOR == "brotli":
+        return _brotli_module.compress(payload, quality=11)
+    if _COMPRESSOR == "zstd":
+        return zstandard.ZstdCompressor(level=22).compress(payload)
+    return zlib.compress(payload, 9)
+def _decompress_quant_payload(payload: bytes) -> bytes:
+    if _COMPRESSOR == "brotli":
+        return _brotli_module.decompress(payload)
+    if _COMPRESSOR == "zstd":
+        return zstandard.ZstdDecompressor().decompress(payload)
+    return zlib.decompress(payload)
+def selective_prune_int6_low_error(quant_result: dict[str, Tensor], quant_meta: dict[str, object], n_values: int) -> int:
+    """
+    Micro-size reducer: zero the lowest-impact +/-1 int6 values first.
+    Error proxy is per-row scale^2 (smaller scale => lower reconstruction impact).
+    """
+    if n_values <= 0:
+        return 0
+    candidates: list[tuple[str, int, float]] = []
+    for name, info in quant_meta.items():
+        if not (isinstance(info, dict) and info.get("type") == "int6"):
+            continue
+        q_name = name + ".q"
+        s_name = name + ".scale"
+        if q_name not in quant_result or s_name not in quant_result:
+            continue
+        q = quant_result[q_name]
+        s = quant_result[s_name]
+        if not isinstance(q, Tensor) or not isinstance(s, Tensor) or q.dtype != torch.int8:
+            continue
+        ones_mask = (q.abs() == 1)
+        if not bool(ones_mask.any()):
+            continue
+        flat_idx = ones_mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+        if flat_idx.numel() == 0:
+            continue
+        if s.ndim > 0:
+            row_idx = torch.arange(q.shape[0], dtype=torch.int64).unsqueeze(1).expand_as(q)[ones_mask]
+            errs = s.float()[row_idx].pow(2).tolist()
+        else:
+            err = float(s.float().item()) ** 2
+            errs = [err] * int(flat_idx.numel())
+        idxs = flat_idx.tolist()
+        candidates.extend((q_name, idx, err) for idx, err in zip(idxs, errs))
+    if not candidates:
+        return 0
+    candidates.sort(key=lambda x: x[2])
+    prune_n = min(n_values, len(candidates))
+    for i in range(prune_n):
+        q_name, idx, _ = candidates[i]
+        quant_result[q_name].view(-1)[idx] = 0
+    return prune_n
 def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
                           template_sd: dict[str, Tensor]) -> dict[str, Tensor]:
     out: dict[str, Tensor] = {}
@@ -2383,10 +2436,10 @@ def main() -> None:
     excluded_mtp = sum(int(t.numel()) for k, t in full_state_dict.items() if "mtp_heads" in k)
     if excluded_mtp > 0:
         log0(f"export_excluding_mtp_params:{excluded_mtp}")
+    code_bytes = len(code.encode("utf-8"))
     if master_process:
         torch.save(export_sd, "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
-        code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
@@ -2400,17 +2453,35 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    if _COMPRESSOR == "brotli":
-        quant_blob = _brotli_module.compress(quant_raw, quality=11)
-    elif _COMPRESSOR == "zstd":
-        quant_blob = zstandard.ZstdCompressor(level=22).compress(quant_raw)
-    else:
-        quant_blob = zlib.compress(quant_raw, 9)
+    quant_blob = _compress_quant_payload(quant_raw)
+    selective_prune_enable = bool(int(os.environ.get("SELECTIVE_PRUNE_ENABLE", "0")))
+    size_target_bytes = int(os.environ.get("SIZE_TARGET_BYTES", "0"))
+    selective_prune_factor = float(os.environ.get("SELECTIVE_PRUNE_FACTOR", "8"))
+    selective_prune_reserve_bytes = int(os.environ.get("SELECTIVE_PRUNE_RESERVE_BYTES", "0"))
+    selective_prune_max_values = int(os.environ.get("SELECTIVE_PRUNE_MAX_VALUES", "0"))
+    if selective_prune_enable and size_target_bytes > 0:
+        pre_total = len(quant_blob) + code_bytes
+        if pre_total > size_target_bytes:
+            excess = pre_total - size_target_bytes + max(selective_prune_reserve_bytes, 0)
+            n_prune = int(math.ceil(max(excess, 0) * max(selective_prune_factor, 0.0)))
+            if selective_prune_max_values > 0:
+                n_prune = min(n_prune, selective_prune_max_values)
+            pruned = selective_prune_int6_low_error(quant_result, quant_meta, n_prune)
+            if pruned > 0:
+                quant_buf = io.BytesIO()
+                torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
+                quant_raw = quant_buf.getvalue()
+                quant_blob = _compress_quant_payload(quant_raw)
+            post_total = len(quant_blob) + code_bytes
+            log0(
+                f"selective_prune_int6 enabled target:{size_target_bytes} "
+                f"pre_total:{pre_total} post_total:{post_total} "
+                f"excess_pre:{pre_total - size_target_bytes} values_pruned:{pruned}"
+            )
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = len(quant_blob)
-        code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model int6+{_COMPRESSOR}: {quant_file_bytes} bytes")
         log0(f"Total submission size int6+{_COMPRESSOR}: {quant_file_bytes + code_bytes} bytes")
         log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
@@ -2418,12 +2489,7 @@ def main() -> None:
         dist.barrier()
     with open("final_model.int6.ptz", "rb") as f:
         quant_blob_disk = f.read()
-    if _COMPRESSOR == "brotli":
-        quant_payload = _brotli_module.decompress(quant_blob_disk)
-    elif _COMPRESSOR == "zstd":
-        quant_payload = zstandard.ZstdDecompressor().decompress(quant_blob_disk)
-    else:
-        quant_payload = zlib.decompress(quant_blob_disk)
+    quant_payload = _decompress_quant_payload(quant_blob_disk)
     quant_state = torch.load(
         io.BytesIO(quant_payload),
         map_location="cpu",
