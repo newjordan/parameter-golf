@@ -1,0 +1,14 @@
+{
+  "target_path": "crawler/2026-04-09_Trapper_Keeper_1/train_gpt.py",
+  "parent_path": "records/track_10min_16mb/2026-04-02_Bandit_Wagon_X_9F_8xH100/train_gpt.py",
+  "target_sha256": "928a5b68add64f046209dd92d69d4e03b8b813d6b9fd9f4dcf2d4b494d1cdd56",
+  "parent_sha256": "1ce12f5b3456afa16b1501ce3cf63a1d158e27fa25d974f3285bd003bb0d483f",
+  "summary": {
+    "total_changed_lines": 101,
+    "hyperparam_changed_lines": 0,
+    "hyperparam_envs": [],
+    "hyperparam_non_env_lines": 0,
+    "non_hyperparam_changed_lines": 101,
+    "hunks": 10
+  }
+}

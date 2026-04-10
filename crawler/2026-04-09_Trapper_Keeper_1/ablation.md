@@ -85,6 +85,44 @@ Gate: artifact <= 16,000,000 bytes — NO (missed by 32,878 bytes)
 Structured metrics snapshot:
 `crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_065634_recovered_from_chat.tsv`
 
+## Live legal run (8xH100, 600s, seed=444, 7F+3C, GPTQ + pyminify + selective prune)
+
+Status: [x] QUALITY PASS — LEGAL ARTIFACT — PENDING seed 300 confirmation
+
+Command:
+`SEED=444 NPROC_PER_NODE=8 bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli_gptq_pyminify_prune.sh`
+
+Raw live log:
+`crawler/2026-04-09_Trapper_Keeper_1/results/train_seed444_20260410_205837.log`
+
+Safe frozen copy:
+`crawler/2026-04-09_Trapper_Keeper_1/results/best_crawler_SOTA_CRAWLER_SAFE_seed444_20260410_205837.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1532 |
+| int6_sw_bpb | 1.13541288 |
+| step_avg_ms | 149.15 |
+| steps | 4,023 |
+| bytes_total | 15,902,698 (LEGAL, 97,302 bytes under cap) |
+| bytes_code | 67,089 |
+| artifact_legal | YES |
+
+Gate: beat 1.13867894 int6_sw_bpb — YES (-0.00327)
+Gate: artifact <= 16,000,000 bytes — YES (97,302 bytes headroom)
+
+Selective prune note:
+`selective_prune_int6 enabled target:16000000 pre_total:16016398 post_total:15902698 excess_pre:16398 values_pruned:393328`
+
+Tradeoff vs unpruned near-miss:
+- Saved 130,180 bytes (`16,032,878` → `15,902,698`)
+- Gave back 0.00123681 int6_sw_bpb (`1.13417607` → `1.13541288`)
+- Still beats BWX 9F by 0.00326606 on seed 444 while staying legal
+
+Structured metrics snapshot:
+`crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_205837.tsv`
+
 ## Safe vs Aggressive gate (4xGPU, 300s wallclock)
 
 | Arm | Config | steps_in_300s | step_ms | val_bpb | Verdict |
