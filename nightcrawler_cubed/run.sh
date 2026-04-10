@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ================================================================
-# Nightcrawler Cubed — working crawler submission stack
+# Nightcrawler Cubed (7F+3C) — working crawler submission stack
 #
 # Copied from crawler/2026-04-09_Trapper_Keeper_1 after the first
 # legal seed-444 result. This folder is the working submission sandbox.
@@ -9,6 +9,7 @@ set -euo pipefail
 # Usage:
 #   SEED=444 NPROC_PER_NODE=8 bash nightcrawler_cubed/run.sh
 #   SEED=300 NPROC_PER_NODE=8 bash nightcrawler_cubed/run.sh
+#   SEED=4   NPROC_PER_NODE=8 bash nightcrawler_cubed/run.sh
 # ================================================================
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,20 +26,20 @@ ENFORCE_SIZE_LIMIT="${ENFORCE_SIZE_LIMIT:-1}"
 
 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-600}"
 WARMDOWN_ITERS="${WARMDOWN_ITERS:-2000}"
-NUM_FLAT_LAYERS="${NUM_FLAT_LAYERS:-8}"
+NUM_FLAT_LAYERS="${NUM_FLAT_LAYERS:-7}"
 NUM_CRAWLER_LAYERS="${NUM_CRAWLER_LAYERS:-3}"
 CRAWLER_LOOPS="${CRAWLER_LOOPS:-3}"
 CRAWLER_QUANT_INT8="${CRAWLER_QUANT_INT8:-0}"   # 0 keeps artifact size safer for 16MB cap
-SKIP_GPTQ="${SKIP_GPTQ:-1}"
-LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ:-0}"
+SKIP_GPTQ="${SKIP_GPTQ:-0}"
+LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ:-1}"
 GPTQ_CAL_SAMPLES="${GPTQ_CAL_SAMPLES:-256}"
 GPTQ_CAL_SEQ_LEN="${GPTQ_CAL_SEQ_LEN:-2048}"
-RUNTIME_PYMINIFY="${RUNTIME_PYMINIFY:-0}"
+RUNTIME_PYMINIFY="${RUNTIME_PYMINIFY:-1}"
 PYMINIFY_MODE="${PYMINIFY_MODE:-aggressive}"    # safe|aggressive|aggressive_globals
 SIZE_TARGET_BYTES="${SIZE_TARGET_BYTES:-${LEGAL_SIZE_LIMIT}}"
-SELECTIVE_PRUNE_ENABLE="${SELECTIVE_PRUNE_ENABLE:-0}"
+SELECTIVE_PRUNE_ENABLE="${SELECTIVE_PRUNE_ENABLE:-1}"
 SELECTIVE_PRUNE_FACTOR="${SELECTIVE_PRUNE_FACTOR:-8}"
-SELECTIVE_PRUNE_RESERVE_BYTES="${SELECTIVE_PRUNE_RESERVE_BYTES:-0}"
+SELECTIVE_PRUNE_RESERVE_BYTES="${SELECTIVE_PRUNE_RESERVE_BYTES:-32768}"
 SELECTIVE_PRUNE_MAX_VALUES="${SELECTIVE_PRUNE_MAX_VALUES:-0}"
 PRESERVE_SEED_ALIAS="${PRESERVE_SEED_ALIAS:-1}"
 
@@ -156,7 +157,7 @@ fi
 
 echo ""
 echo "============================================"
-echo "  Nightcrawler Cubed — full run"
+echo "  Nightcrawler Cubed (7F+3C) — full run"
 echo "  seed=${SEED} GPUs=${NPROC} wallclock=${MAX_WALLCLOCK_SECONDS}s"
 echo "  NUM_FLAT_LAYERS=${NUM_FLAT_LAYERS} NUM_CRAWLER_LAYERS=${NUM_CRAWLER_LAYERS} CRAWLER_LOOPS=${CRAWLER_LOOPS}"
 echo "  CRAWLER_QUANT_INT8=${CRAWLER_QUANT_INT8}  (0=smaller artifacts, 1=higher risk for >16MB)"
@@ -259,7 +260,7 @@ fi
 
 echo ""
 echo "============================================"
-echo "  RESULT — Nightcrawler Cubed seed=${SEED}"
+echo "  RESULT — Nightcrawler Cubed (7F+3C) seed=${SEED}"
 echo "  model_params:  ${model_params:-?}"
 echo "  raw_bpb:       ${raw_bpb:-?}"
 echo "  int6_sw_bpb:   ${int6_sw_bpb:-?}"

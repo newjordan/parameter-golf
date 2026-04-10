@@ -1,4 +1,4 @@
-# Nightcrawler Cubed
+# Nightcrawler Cubed (7F+3C)
 
 Working submission folder for the current crawler SOTA path.
 
@@ -16,11 +16,18 @@ Current confirmed 3-seed reference:
 
 Entry points:
 - `run_10min.sh`: exact legal 10-minute stack
-- `run_4h.sh`: working copy reserved for the future 4-hour variant
+- `run_4h.sh`: real 4-hour production runner on the same 7F+3C stack
+
+4-hour production defaults:
+- `SEED=4` (best locked Nightcrawler Cubed seed)
+- `MAX_WALLCLOCK_SECONDS=14400`
+- `ITERATIONS=200000` so the wallclock cap, not the old 20k default, governs stop
+- `WARMDOWN_ITERS=12000`
 
 Typical usage:
 ```bash
 SEED=444 NPROC_PER_NODE=8 bash nightcrawler_cubed/run_10min.sh
 SEED=300 NPROC_PER_NODE=8 bash nightcrawler_cubed/run_10min.sh
 SEED=4   NPROC_PER_NODE=8 bash nightcrawler_cubed/run_10min.sh
+NPROC_PER_NODE=8 bash nightcrawler_cubed/run_4h.sh
 ```
