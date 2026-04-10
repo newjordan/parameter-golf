@@ -1,0 +1,2 @@
+seed	model_params	raw_bpb	int6_sw_bpb	steps	step_ms	train_time_s	bytes_total	bytes_code	artifact_legal	log
+444	29415508	1.1609	1.14311840	3564	168.35	600	15621122	67707	yes	/workspace/parameter-golf/nightcrawler_cubed_folding/results/train_seed444_20260410_225846.log

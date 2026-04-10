@@ -1,0 +1,2 @@
+seed	model_params	raw_bpb	int6_sw_bpb	steps	step_ms	train_time_s	bytes_total	bytes_code	artifact_legal	log
+4	29415508	1.1528	1.13536063	4012	149.57	600	15844157	67089	yes	/workspace/parameter-golf/crawler/2026-04-09_Trapper_Keeper_1/results/train_seed4_20260410_213324.log

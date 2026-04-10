@@ -1,4 +1,48 @@
-# Ablation: Trapper_Keeper_1
+# Ablation: Nightcrawler Cubed Folding
+
+Date: 2026-04-10
+Track: crawler
+Parent: `nightcrawler_cubed` locked winner
+
+## Linked Flat Recurrence Probe (8xH100, 600s, seed=444)
+
+Status: [x] LEGAL ARTIFACT — [ ] NO PROMOTION — [x] REQUIRES MAJOR RECONFIG TO PURSUE
+
+Command:
+`SEED=444 NPROC_PER_NODE=8 bash nightcrawler_cubed_folding/run_10min_linked_flat_recur.sh`
+
+Source note:
+This record was reconstructed from pasted terminal output after the pod was shut down.
+The exact saved artifact is:
+`nightcrawler_cubed_folding/results/train_seed444_20260410_225846.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1609 |
+| int6_sw_bpb | 1.14311840 |
+| step_avg_ms | 168.35 |
+| steps | 3,564 |
+| train_time_s | 600 |
+| bytes_total | 15,621,122 |
+| bytes_code | 67,707 |
+| artifact_legal | YES |
+
+Delta vs locked `nightcrawler_cubed` winner (`seed=444`):
+
+- BPB: `1.13541288` → `1.14311840` (`+0.00770552`, worse)
+- step time: `149.15ms` → `168.35ms` (`+19.20ms`)
+- steps: `4023` → `3564` (`-459`)
+- bytes: `15,902,698` → `15,621,122` (`-281,576`)
+
+Interpretation:
+
+- linked flat recurrence is composable enough to stay legal
+- in the current crawler family it appears to duplicate iterative work the crawler already does
+- the speed loss dominates any potential quality benefit
+- this is not a follow-up by small tuning alone; it would need a more substantial redesign
+
+## Historical Baseline Notes
 
 Date: 2026-04-09
 Track: crawler

@@ -44,3 +44,20 @@ Gate on seed `444` first. Watch all four:
 - artifact bytes
 - `step_avg`
 - GPTQ / prune behavior
+
+## Outcome
+
+Seed `444` result:
+
+- `raw_bpb=1.1609`
+- `int6_sw_bpb=1.14311840`
+- `step_avg_ms=168.35`
+- `steps=3564`
+- `bytes_total=15621122`
+- `artifact_legal=yes`
+
+Verdict:
+
+- the concept is not a dead leg in the sense that it remains legal and technically coherent
+- it does not promote in current form because the extra flat recurrence costs too many steps
+- next progress on this idea would require a larger reconfiguration, not just adding more linked-flat depth
