@@ -1,15 +1,16 @@
 #!/bin/bash
 set -euo pipefail
-# ================================================================
-# Trapper Keeper 1 variant — 7F+3C + loop-aware GPTQ + python-minifier
+# TK1 7F+3C + loop-aware GPTQ + python-minifier (code trim)
 #
-# This stacks code-size trimming on top of run_7f3c_brotli_gptq.sh.
-# Keep this as a separate runner so GPTQ-only and GPTQ+minify remain isolated.
+# Install once (separate command):
+#   python3 -m pip install --user python-minifier
 #
-# Usage:
+# Run:
+#   SEED=444 NPROC_PER_NODE=8 ENFORCE_SIZE_LIMIT=0 PYMINIFY_MODE=aggressive \
 #   bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli_gptq_pyminify.sh
-#   PYMINIFY_MODE=safe bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli_gptq_pyminify.sh
-# ================================================================
+#
+# Optional:
+#   PYMINIFY_MODE=safe
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
