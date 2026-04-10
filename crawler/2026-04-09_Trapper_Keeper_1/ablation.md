@@ -87,7 +87,7 @@ Structured metrics snapshot:
 
 ## Live legal run (8xH100, 600s, seed=444, 7F+3C, GPTQ + pyminify + selective prune)
 
-Status: [x] QUALITY PASS — LEGAL ARTIFACT — PENDING seed 300 confirmation
+Status: [x] QUALITY PASS — LEGAL ARTIFACT — confirmed on seeds 300 and 4
 
 Command:
 `SEED=444 NPROC_PER_NODE=8 bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli_gptq_pyminify_prune.sh`
@@ -122,6 +122,71 @@ Tradeoff vs unpruned near-miss:
 
 Structured metrics snapshot:
 `crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_205837.tsv`
+
+## Confirmation run (8xH100, 600s, seed=300, 7F+3C, GPTQ + pyminify + selective prune)
+
+Status: [x] CONFIRMS — LEGAL ARTIFACT
+
+Raw live log:
+`crawler/2026-04-09_Trapper_Keeper_1/results/train_seed300_20260410_211710.log`
+
+Safe frozen copy:
+`crawler/2026-04-09_Trapper_Keeper_1/results/best_crawler_SOTA_CRAWLER_SAFE_seed300_20260410_211710.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1555 |
+| int6_sw_bpb | 1.13853446 |
+| step_avg_ms | 149.78 |
+| steps | 4,006 |
+| bytes_total | 15,851,974 (LEGAL, 148,026 bytes under cap) |
+| bytes_code | 67,089 |
+| artifact_legal | YES |
+
+Seed-300 delta vs BWX 9F:
+- `1.13867894` → `1.13853446` (`-0.00014448`)
+
+Structured metrics snapshot:
+`crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed300_20260410_211710.tsv`
+
+## Third required run (8xH100, 600s, seed=4, 7F+3C, GPTQ + pyminify + selective prune)
+
+Status: [x] PASS — LEGAL ARTIFACT
+
+Raw live log:
+`crawler/2026-04-09_Trapper_Keeper_1/results/train_seed4_20260410_213324.log`
+
+Safe frozen copy:
+`crawler/2026-04-09_Trapper_Keeper_1/results/best_crawler_SOTA_CRAWLER_SAFE_seed4_20260410_213324.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1528 |
+| int6_sw_bpb | 1.13536063 |
+| step_avg_ms | 149.57 |
+| steps | 4,012 |
+| bytes_total | 15,844,157 (LEGAL, 155,843 bytes under cap) |
+| bytes_code | 67,089 |
+| artifact_legal | YES |
+
+Structured metrics snapshot:
+`crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed4_20260410_213324.tsv`
+
+## Three-seed verdict
+
+Status: [x] CURRENT IN-TREE WINNER
+
+| Seed | int6_sw_bpb | bytes_total | legal |
+|------|-------------|-------------|-------|
+| 444 | 1.13541288 | 15,902,698 | YES |
+| 300 | 1.13853446 | 15,851,974 | YES |
+| 4 | 1.13536063 | 15,844,157 | YES |
+| mean | 1.13643599 | 15,902,698 (max) | YES |
+
+All three required seeds are legal and all three beat the BWX 9F in-tree leader.
+This variant is now the locked-in crawler winner pending records-folder packaging.
 
 ## Safe vs Aggressive gate (4xGPU, 300s wallclock)
 

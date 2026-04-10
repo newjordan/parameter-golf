@@ -1,19 +1,6 @@
-============================================
-  Trapper Keeper 1 (8F+3C) — full run
-  seed=444 GPUs=8 wallclock=600s
-  NUM_FLAT_LAYERS=7 NUM_CRAWLER_LAYERS=3 CRAWLER_LOOPS=3
-  CRAWLER_QUANT_INT8=0  (0=smaller artifacts, 1=higher risk for >16MB)
-  SKIP_GPTQ=0 LOOP_AWARE_GPTQ=1 GPTQ_CAL_SAMPLES=256
-  RUNTIME_PYMINIFY=1 PYMINIFY_MODE=aggressive
-  SIZE_TARGET_BYTES=16000000 SELECTIVE_PRUNE_ENABLE=1 SELECTIVE_PRUNE_FACTOR=8
-  PRESERVE_SEED_ALIAS=1
-  train_py=/workspace/parameter-golf/crawler/2026-04-09_Trapper_Keeper_1/logs/train_gpt_seed444_20260410_205837.min.py
-  log: /workspace/parameter-golf/crawler/2026-04-09_Trapper_Keeper_1/logs/train_seed444_20260410_205837.log
-============================================
-
-W0410 20:58:40.828000 2387 torch/distributed/run.py:803]
+W0410 20:58:40.828000 2387 torch/distributed/run.py:803] 
 W0410 20:58:40.828000 2387 torch/distributed/run.py:803] *****************************************
-W0410 20:58:40.828000 2387 torch/distributed/run.py:803] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed.
+W0410 20:58:40.828000 2387 torch/distributed/run.py:803] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
 W0410 20:58:40.828000 2387 torch/distributed/run.py:803] *****************************************
 logs/4b6136d3-600b-4528-b9d1-89630545d661.txt
 val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
@@ -144,17 +131,3 @@ final_int6_roundtrip_exact val_loss:1.95877641 val_bpb:1.16009772
 final_int6_sliding_window val_loss:1.9171 val_bpb:1.1354 stride:64 eval_time:149268ms
 final_int6_sliding_window_exact val_loss:1.91709202 val_bpb:1.13541288
 final_int8_zlib_roundtrip_exact val_loss:1.91709202 val_bpb:1.13541288
-
-============================================
-  RESULT — Trapper Keeper 1 (8F+3C) seed=444
-  model_params:  29415508
-  raw_bpb:       1.1532
-  int6_sw_bpb:   1.13541288
-  step_avg_ms:   149.15
-  steps:         4023
-  train_time_s:  600
-  bytes_total:   15902698  (limit 16000000)
-  bytes_code:    67089
-  artifact_legal:yes
-  log:           /workspace/parameter-golf/crawler/2026-04-09_Trapper_Keeper_1/results/train_seed444_20260410_205837.log
-============================================

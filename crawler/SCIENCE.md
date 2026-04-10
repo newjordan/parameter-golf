@@ -9,9 +9,9 @@ Legend: → PROMOTED · ✓ PASS · ✗ FAIL · ⏳ PENDING · — n/a
 
 ## Status Sync (2026-04-10)
 
-- In-tree promotion baseline is BWX 9F full run: `1.13867894` int6_sw_bpb, `15,239,617` bytes (seed 444).
+- In-tree promotion baseline is now TK1 recovered legal 7F+3C full run trio: seed `444=1.13541288`, seed `300=1.13853446`, seed `4=1.13536063`, mean `1.13643599`, max artifact `15,902,698` bytes.
 - **Trapper Keeper 1 (8F+3C)** production gate: `1.13526829` int6_sw_bpb — beats leader by `-0.00341`. BUT artifact `17,948,983` bytes (over 16MB cap with zstd). Brotli recompress pending. Pod lacked FA3 (157ms/step, 3811 steps). With FA3+more steps, quality would likely improve further.
-- **TK1 recovered 7F+3C + GPTQ + pyminify + selective prune** is now legal: `1.13541288` int6_sw_bpb at `15,902,698` bytes (seed 444). This is the best legal in-tree crawler seed-444 result, pending seed 300 confirmation before leader promotion.
+- **TK1 recovered 7F+3C + GPTQ + pyminify + selective prune** is now fully confirmed on seeds 444/300/4 and is the current in-tree crawler winner.
 - Layer relationship grid (5×4, 20 arms) mapped full flat×crawler surface. 8F+3C is quality peak. 3C matches 3-loop symmetry. 4C reverses. Ridge runs 8F+3C → 7F+4C → 7F+3C.
 - Corpus ablation validated: multi-crawler (-0.0119), 4-loop diff battery (-0.0046), anchor (-0.0024), QAT softclamp (-0.0047). Dead: INST_DIM=64, sigmoidste, C>loops symmetry.
 - Safe vs aggressive (3 vs 4 loops on 8F+3C): 3 loops wins on wallclock. 4th loop is waste.
@@ -193,7 +193,7 @@ Based on 20-arm layer relationship grid mapping flat(5-9) × crawler(1-4) surfac
 | 2026-04-09 | Grid 8F+3C | FLAT=8, CRAWL=3 | 2xGPU, 1000 steps | 1.39529 | 14.58MB | 181 | grid best |
 | 2026-04-09 | Isolated 8F+3C | FLAT=8, CRAWL=3 | 4xGPU, 1000 steps | 1.34632 | 15.00MB | 574 | confirmed |
 | 2026-04-09 | **TK1 production** | **FLAT=8, CRAWL=3** | **8xH100, 600s, no FA3** | **1.13527** | **17.95MB** | **157** | **QUALITY PASS, SIZE FAIL** |
-| 2026-04-10 | **TK1 recovered legal** | **FLAT=7, CRAWL=3, GPTQ+pyminify+prune** | **8xH100, 600s, FA3** | **1.13541** | **15.90MB** | **149** | **QUALITY PASS, LEGAL, seed 300 pending** |
+| 2026-04-10 | **TK1 recovered legal** | **FLAT=7, CRAWL=3, GPTQ+pyminify+prune** | **8xH100, 600s, FA3** | **1.13541** | **15.90MB** | **149** | **QUALITY PASS, LEGAL, confirmed on 300 and 4** |
 
 Production quality beats BWX 9F by -0.00341. Artifact over 16MB with zstd. Brotli recompress pending.
 Pod lacked FA3 — with FA3, step time would be ~110ms → ~5,450 steps (vs 3,811). Quality would improve.
@@ -252,8 +252,8 @@ Tested 4×4, 6×6, 8×8 on 8F base. Only 4×4 completed (806ms/step, impractical
 
 | Leg | BPB (seed 444) | Size | Mean BPB | Status |
 |-----|----------------|------|----------|--------|
-| **BWX 9F** | **1.13867894** | **15.24MB** | pending (seed 300) | **Current in-tree leader** |
-| TK1 7F+3C + GPTQ + pyminify + prune | 1.13541288 | 15.90MB | pending | best legal seed-444 result, pending seed 300 |
+| **TK1 7F+3C + GPTQ + pyminify + prune** | **1.13541288** | **15.90MB** | **1.13643599** | **Current in-tree leader** |
+| BWX 9F | 1.13867894 | 15.24MB | pending (seed 300) | Former in-tree leader |
 | TK1 (8F+3C) | 1.13526829 | 17.95MB (OVER) | — | quality pass, size fail — brotli pending |
 | Leg 3 | 1.18720 | 8.84MB | 1.18743 (3-seed) | Former champion |
 | BW4 | 1.18731 | 8.97MB | — | Superseded |
