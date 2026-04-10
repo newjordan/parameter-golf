@@ -18,6 +18,7 @@ Entry points:
 - `run_10min.sh`: exact legal 10-minute stack
 - `run_4h.sh`: working copy reserved for the future 4-hour variant
 - `run_10min_linked_flat_recur.sh`: folding experiment, reuses the deepest encoder flat block inside each crawler loop
+- `run_10min_linked_flat_recur_3deep.sh`: aggressive folding experiment, reuses the full 3-layer encoder tail inside each crawler loop
 
 Typical usage:
 ```bash
