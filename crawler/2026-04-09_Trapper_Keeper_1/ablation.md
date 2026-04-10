@@ -32,6 +32,32 @@ zstd compression: 17,948,983 bytes (1.95MB over)
 Brotli patch committed but not yet tested on this artifact.
 Expected brotli savings: 10-15% → ~15.3-16.1MB. Needs verification.
 
+## Recovered disconnected run (8xH100, 600s, seed=444, 7F+3C)
+
+Status: [x] QUALITY PASS — NEAR-MISS SIZE FAIL
+
+Command: `SEED=444 NPROC_PER_NODE=8 bash crawler/2026-04-09_Trapper_Keeper_1/run_7f3c_brotli.sh`
+
+Raw recovered log:
+`crawler/2026-04-09_Trapper_Keeper_1/results/train_seed444_20260410_055647.log`
+
+| Metric | Value |
+|--------|-------|
+| model_params | 29,415,508 |
+| raw_bpb | 1.1532 |
+| int6_sw_bpb | 1.13678077 |
+| step_avg_ms | 150.12 |
+| steps | 3,997 |
+| bytes_total | 16,065,029 (OVER 16MB cap by 65,029 bytes) |
+| bytes_code | 122,265 |
+| artifact_legal | NO |
+
+Gate: beat 1.13867894 int6_sw_bpb — YES (-0.00190)
+Gate: artifact <= 16,000,000 bytes — NO (missed by 65,029 bytes)
+
+Structured metrics snapshot:
+`crawler/2026-04-09_Trapper_Keeper_1/results/metrics_seed444_20260410_055647_recovered.tsv`
+
 ## Safe vs Aggressive gate (4xGPU, 300s wallclock)
 
 | Arm | Config | steps_in_300s | step_ms | val_bpb | Verdict |

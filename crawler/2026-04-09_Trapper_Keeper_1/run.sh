@@ -30,9 +30,16 @@ NUM_FLAT_LAYERS="${NUM_FLAT_LAYERS:-8}"
 NUM_CRAWLER_LAYERS="${NUM_CRAWLER_LAYERS:-3}"
 CRAWLER_LOOPS="${CRAWLER_LOOPS:-3}"
 CRAWLER_QUANT_INT8="${CRAWLER_QUANT_INT8:-0}"   # 0 keeps artifact size safer for 16MB cap
+SKIP_GPTQ="${SKIP_GPTQ:-1}"
+LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ:-0}"
+GPTQ_CAL_SAMPLES="${GPTQ_CAL_SAMPLES:-256}"
+GPTQ_CAL_SEQ_LEN="${GPTQ_CAL_SEQ_LEN:-2048}"
+RUNTIME_PYMINIFY="${RUNTIME_PYMINIFY:-0}"
+PYMINIFY_MODE="${PYMINIFY_MODE:-aggressive}"    # safe|aggressive
 
 mkdir -p "${SCRIPT_DIR}/logs"
-LOG_TS="${SCRIPT_DIR}/logs/train_seed${SEED}_$(date +%Y%m%d_%H%M%S).log"
+LOG_STAMP="$(date +%Y%m%d_%H%M%S)"
+LOG_TS="${SCRIPT_DIR}/logs/train_seed${SEED}_${LOG_STAMP}.log"
 LOG="${SCRIPT_DIR}/train_seed${SEED}.log"
 
 if command -v torchrun >/dev/null 2>&1; then
@@ -75,12 +82,68 @@ assert len(shards) >= 8, f"need >=8 train shards, found {len(shards)}"
 print(f"  tokenizer OK, train shards={len(shards)}")
 PY
 
+TRAIN_PY_RUN="${TRAIN_PY}"
+if [[ "${RUNTIME_PYMINIFY}" == "1" ]]; then
+    TRIMMED_PY="${SCRIPT_DIR}/logs/train_gpt_seed${SEED}_${LOG_STAMP}.min.py"
+    echo "[preflight] runtime python-minifier..."
+    python3 - "${TRAIN_PY}" "${TRIMMED_PY}" "${PYMINIFY_MODE}" <<'PY'
+import pathlib
+import sys
+
+src_path = pathlib.Path(sys.argv[1])
+dst_path = pathlib.Path(sys.argv[2])
+mode = sys.argv[3].strip().lower()
+
+try:
+    import python_minifier
+except Exception as exc:
+    raise SystemExit(
+        f"  ERROR: python-minifier not importable ({exc}). "
+        "Install with: python3 -m pip install --user python-minifier"
+    )
+
+source = src_path.read_text(encoding="utf-8")
+if mode == "safe":
+    options = dict(
+        remove_literal_statements=True,
+        remove_asserts=True,
+        remove_debug=True,
+        rename_locals=False,
+        rename_globals=False,
+        hoist_literals=True,
+    )
+elif mode == "aggressive":
+    options = dict(
+        remove_literal_statements=True,
+        remove_asserts=True,
+        remove_debug=True,
+        rename_locals=True,
+        rename_globals=False,
+        hoist_literals=True,
+    )
+else:
+    raise SystemExit(f"  ERROR: PYMINIFY_MODE must be safe|aggressive, got: {mode}")
+
+minified = python_minifier.minify(source, **options)
+compile(minified, str(dst_path), "exec")
+dst_path.write_text(minified + "\n", encoding="utf-8")
+print(
+    f"  pyminify mode={mode} orig_bytes={len(source.encode('utf-8'))} "
+    f"min_bytes={len(minified.encode('utf-8'))} out={dst_path}"
+)
+PY
+    TRAIN_PY_RUN="${TRIMMED_PY}"
+fi
+
 echo ""
 echo "============================================"
 echo "  Trapper Keeper 1 (8F+3C) — full run"
 echo "  seed=${SEED} GPUs=${NPROC} wallclock=${MAX_WALLCLOCK_SECONDS}s"
 echo "  NUM_FLAT_LAYERS=${NUM_FLAT_LAYERS} NUM_CRAWLER_LAYERS=${NUM_CRAWLER_LAYERS} CRAWLER_LOOPS=${CRAWLER_LOOPS}"
 echo "  CRAWLER_QUANT_INT8=${CRAWLER_QUANT_INT8}  (0=smaller artifacts, 1=higher risk for >16MB)"
+echo "  SKIP_GPTQ=${SKIP_GPTQ} LOOP_AWARE_GPTQ=${LOOP_AWARE_GPTQ} GPTQ_CAL_SAMPLES=${GPTQ_CAL_SAMPLES}"
+echo "  RUNTIME_PYMINIFY=${RUNTIME_PYMINIFY} PYMINIFY_MODE=${PYMINIFY_MODE}"
+echo "  train_py=${TRAIN_PY_RUN}"
 echo "  log: ${LOG_TS}"
 echo "============================================"
 echo ""
@@ -110,8 +173,10 @@ env \
     CRAWLER_QUANT_INT8="${CRAWLER_QUANT_INT8}" \
     DELTA_NET_HEADS=0 \
     SKIP_EMA=1 \
-    SKIP_GPTQ=1 \
-    LOOP_AWARE_GPTQ=0 \
+    SKIP_GPTQ="${SKIP_GPTQ}" \
+    LOOP_AWARE_GPTQ="${LOOP_AWARE_GPTQ}" \
+    GPTQ_CAL_SAMPLES="${GPTQ_CAL_SAMPLES}" \
+    GPTQ_CAL_SEQ_LEN="${GPTQ_CAL_SEQ_LEN}" \
     MLP_LEAKY_SLOPE=0.5 \
     CRAWLER_MLP_LEAKY_SLOPE=0.5 \
     CRAWLER_MLP_CHOKE_DIM=0 \
@@ -125,7 +190,7 @@ env \
     ANCHOR_DIM=0 \
     FLAT_WEIGHT_SHARE=0 \
     NPROC_PER_NODE="${NPROC}" \
-    "${TORCHRUN[@]}" --standalone --nproc_per_node="${NPROC}" "${TRAIN_PY}" \
+    "${TORCHRUN[@]}" --standalone --nproc_per_node="${NPROC}" "${TRAIN_PY_RUN}" \
     2>&1 | tee "${LOG_TS}"
 
 cp -f "${LOG_TS}" "${LOG}"

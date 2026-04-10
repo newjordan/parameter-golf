@@ -1,0 +1,2 @@
+seed	model_params	raw_bpb	int6_sw_bpb	steps	step_ms	train_time_s	bytes_total	bytes_code	artifact_legal	log
+444	29415508	1.1532	1.13678077	3997	150.12	600	16065029	122265	no	crawler/2026-04-09_Trapper_Keeper_1/results/train_seed444_20260410_055647.log
