@@ -1,0 +1,5 @@
+impl	B	H	T	D	dtype	fwd_ms	fwd_p50_ms	bwd_ms	bwd_p50_ms	peak_mem_mb	iters	ok	err	cfg_block	cfg_fwd_warps	cfg_fwd_stages	cfg_bwd_chaos_warps	cfg_bwd_chaos_stages	cfg_bwd_attn_warps	cfg_bwd_attn_stages	cfg_chaos_iters
+vortex_fused	2	4	512	128	bf16	0.2843	0.2840	1.1131	1.0996	73.15	5	1		64	2	1	4	1	4	1	5
+vortex_fused	2	4	512	128	bf16	0.2817	0.2785	1.1533	1.1783	73.15	5	1		64	2	2	4	1	4	1	5
+vortex_fused	2	4	512	128	bf16	0.1187	0.1161	1.0429	1.0454	73.15	5	1		64	4	1	4	1	4	1	5
+vortex_fused	2	4	512	128	bf16	0.1051	0.1037	1.0777	1.1063	73.15	5	1		64	4	2	4	1	4	1	5

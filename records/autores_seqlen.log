@@ -1,0 +1,6 @@
+# $ /venv/main/bin/python -m bench.vortex_bench --B 4 --H 8 --T 512 --D 128 --iters 15 --warmup 5 --chaos-iters 5  env={}
+# $ /venv/main/bin/python -m bench.vortex_bench --B 4 --H 8 --T 1024 --D 128 --iters 15 --warmup 5 --chaos-iters 5  env={}
+# $ /venv/main/bin/python -m bench.vortex_bench --B 4 --H 8 --T 2048 --D 128 --iters 15 --warmup 5 --chaos-iters 5  env={}
+# $ /venv/main/bin/python -m bench.vortex_bench --B 4 --H 8 --T 4096 --D 128 --iters 15 --warmup 5 --chaos-iters 5  env={}
+# $ /venv/main/bin/python -m bench.vortex_bench --B 4 --H 8 --T 8192 --D 128 --iters 15 --warmup 5 --chaos-iters 5  env={}
+# autoresearch total wall: 222.3s -> records/autores_seqlen.tsv
