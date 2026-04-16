@@ -743,13 +743,9 @@ def launch_vortex_fused_bwd(
               f"attn_dkv={ev_dkv0.elapsed_time(ev_dkv1):.3f}ms", flush=True)
 
     # Apply softmax Jacobian to dmixer grads accumulated in pre-softmax space.
+    # Single-expression form keeps this to ~3 kernel launches rather than 7.
     with torch.no_grad():
-        gate = torch.nn.functional.softmax(mixer_gate, dim=0).float()
-        dg_hat = dmixer_workspace
-        dg = torch.zeros_like(mixer_gate)
-        dot = dg_hat[0] * gate[0] + dg_hat[1] * gate[1] + dg_hat[2] * gate[2]
-        dg[0] = gate[0] * (dg_hat[0] - dot)
-        dg[1] = gate[1] * (dg_hat[1] - dot)
-        dg[2] = gate[2] * (dg_hat[2] - dot)
+        gate = torch.softmax(mixer_gate.float(), dim=0)
+        dg = (gate * (dmixer_workspace - (dmixer_workspace * gate).sum())).to(mixer_gate.dtype)
 
     return dq, dk, dv, dw_workspace.to(q.dtype), dscalars_workspace, dg, dperturb_workspace
