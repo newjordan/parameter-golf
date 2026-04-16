@@ -410,13 +410,17 @@ def _vortex_chaos_bwd_kernel(
     Di_local = tl.where(q_mask, Di_local, 0.0)
     tl.store(Di_out + bh_id * stride_lh + offs_tok, Di_local, mask=q_mask)
 
-    W_offs_x = tl.arange(0, D)[:, None]
-    W_offs_y = tl.arange(0, D)[None, :]
-    tl.atomic_add(dW_workspace + W_offs_x * D + W_offs_y, dW_local)
+    # At CHAOS_DEPTH=0 dW_local/dAlpha/dBeta/dPhi are all compile-time zero
+    # (no iter branch ever fires). Skipping these atomics avoids 1024 programs
+    # × 16K contended writes to the tiny dW/dScalars workspaces.
+    if CHAOS_DEPTH > 0:
+        W_offs_x = tl.arange(0, D)[:, None]
+        W_offs_y = tl.arange(0, D)[None, :]
+        tl.atomic_add(dW_workspace + W_offs_x * D + W_offs_y, dW_local)
 
-    tl.atomic_add(dScalars_workspace + 0, dAlpha_local)
-    tl.atomic_add(dScalars_workspace + 1, dBeta_local)
-    tl.atomic_add(dScalars_workspace + 2, dPhi_local)
+        tl.atomic_add(dScalars_workspace + 0, dAlpha_local)
+        tl.atomic_add(dScalars_workspace + 1, dBeta_local)
+        tl.atomic_add(dScalars_workspace + 2, dPhi_local)
 
     tl.atomic_add(dMixer_workspace + 0, dGate0_local)
     tl.atomic_add(dMixer_workspace + 1, dGate1_local)
