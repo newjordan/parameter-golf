@@ -9,6 +9,51 @@ _BWD_CHAOS_NUM_WARPS = int(os.environ.get("VORTEX_BWD_CHAOS_NUM_WARPS", "4"))
 _BWD_CHAOS_NUM_STAGES = int(os.environ.get("VORTEX_BWD_CHAOS_NUM_STAGES", "1"))
 _BWD_ATTN_NUM_WARPS = int(os.environ.get("VORTEX_BWD_ATTN_NUM_WARPS", "4"))
 _BWD_ATTN_NUM_STAGES = int(os.environ.get("VORTEX_BWD_ATTN_NUM_STAGES", "1"))
+_BWD_ATTN_DKV_NUM_WARPS = int(os.environ.get("VORTEX_BWD_ATTN_DKV_NUM_WARPS", str(_BWD_ATTN_NUM_WARPS)))
+_BWD_ATTN_DKV_NUM_STAGES = int(os.environ.get("VORTEX_BWD_ATTN_DKV_NUM_STAGES", "1"))
+_BWD_PROFILE = int(os.environ.get("VORTEX_BWD_PROFILE", "0"))
+
+
+def build_attn_bwd_csrT(row_ptr, col_idx, num_blocks):
+    """Build a transposed CSR of the OFF-diagonal sparsity pattern.
+
+    The fwd convention places the diagonal K-block as the final entry of each
+    Q-row's col_idx slice. This helper enumerates, per (B,H), the Q-blocks
+    that reference each K-block as an off-diagonal attendee, used by the
+    K-parallel dK/dV kernel to accumulate without atomics.
+    """
+    import numpy as np
+    rp = row_ptr.detach().cpu().numpy()
+    ci = col_idx.detach().cpu().numpy()
+    B, H = rp.shape[0], rp.shape[1]
+    rp_flat = rp.reshape(B * H, -1)
+    ci_flat = ci.reshape(B * H, -1)
+    rpt_rows = []
+    cit_rows = []
+    for bh in range(B * H):
+        bucket = [[] for _ in range(num_blocks)]
+        rp_row = rp_flat[bh]
+        ci_row = ci_flat[bh]
+        for i in range(num_blocks):
+            lo = int(rp_row[i]); hi = int(rp_row[i + 1])
+            for p in range(lo, max(lo, hi - 1)):
+                bucket[int(ci_row[p])].append(i)
+        offs = [0]
+        vals = []
+        for k in range(num_blocks):
+            vals.extend(bucket[k])
+            offs.append(len(vals))
+        rpt_rows.append(offs)
+        cit_rows.append(vals)
+    max_nnz = max(1, max(len(v) for v in cit_rows))
+    cit_pad = np.zeros((B * H, max_nnz), dtype=np.int32)
+    for bh, v in enumerate(cit_rows):
+        if v:
+            cit_pad[bh, :len(v)] = v
+    rpt_np = np.asarray(rpt_rows, dtype=np.int32)
+    rp_T = torch.from_numpy(rpt_np).to(row_ptr.device).reshape(B, H, num_blocks + 1).contiguous()
+    ci_T = torch.from_numpy(cit_pad).to(row_ptr.device).reshape(B, H, max_nnz).contiguous()
+    return rp_T, ci_T
 
 
 @triton.jit
@@ -17,9 +62,11 @@ def _vortex_chaos_bwd_kernel(
     Proj_Weight, Chaos_Scalars, Mixer_Gate, Chaos_Perturb,
     dO,
     dA_total_out,
+    Di_out,
     dW_workspace, dScalars_workspace, dMixer_workspace, dPerturb_workspace,
     RowPtr, ColIdx, SeqLens,
     ChaosStore_B, ChaosStore_T,
+    AStore,
     stride_cih,
     T_MAX: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -28,10 +75,12 @@ def _vortex_chaos_bwd_kernel(
     D: tl.constexpr,
     CHAOS_DEPTH: tl.constexpr,
     LOAD_CHAOS: tl.constexpr,
+    LOAD_A: tl.constexpr,
 ):
     stride_h: tl.constexpr = T_MAX * D
     stride_t: tl.constexpr = D
     stride_rph: tl.constexpr = (T_MAX // BS) + 1
+    stride_lh: tl.constexpr = T_MAX
     NUM_Q_BLOCKS: tl.constexpr = T_MAX // BS
 
     pid = tl.program_id(0)
@@ -47,66 +96,74 @@ def _vortex_chaos_bwd_kernel(
     if q_start >= seq_len:
         dA_ptr_e = dA_total_out + bh_id * stride_h
         tl.store(dA_ptr_e + offs_tok[:, None] * stride_t + offs_d[None, :], tl.zeros([BS, D], dtype=tl.bfloat16))
+        tl.store(Di_out + bh_id * stride_lh + offs_tok, tl.zeros([BS], dtype=tl.float32))
         return
 
     q_mask = offs_tok < seq_len
-    Q_ptr = Q + bh_id * stride_h
-    q_bf16 = tl.load(Q_ptr + offs_tok[:, None] * stride_t + offs_d[None, :])
-
-    m_i = tl.full([BS], float("-inf"), dtype=tl.float32)
-    l_i = tl.zeros([BS], dtype=tl.float32)
-    acc = tl.zeros([BS, D], dtype=tl.float32)
-
-    rp_base = RowPtr + bh_id * stride_rph + q_block_id
-    ci_lo = tl.load(rp_base)
-    ci_hi = tl.load(rp_base + 1)
-
-    K_ptr = K + bh_id * stride_h
-    V_ptr = V + bh_id * stride_h
-    CI_ptr = ColIdx + bh_id * stride_cih
-
-    offs_k_tile = tl.arange(0, BS)
     LOG2E: tl.constexpr = 1.4426950408889634
     SCALE_2: tl.constexpr = SCALE * LOG2E
-    boundary = (q_start + BS) > seq_len
 
-    if ci_hi > ci_lo:
-        k_start_d = q_block_id * BS
-        offs_k_d = k_start_d + offs_k_tile
-        if boundary:
-            k_mask = offs_k_d < seq_len
-            k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
-            v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
-            s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE_2
-            causal = offs_tok[:, None] >= offs_k_d[None, :]
-            s_d = tl.where(causal & k_mask[None, :], s_d, float("-inf"))
-        else:
-            k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
-            v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
-            s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE_2
-            causal = offs_tok[:, None] >= offs_k_d[None, :]
-            s_d = tl.where(causal, s_d, float("-inf"))
-        m_i = tl.max(s_d, axis=1)
-        p_d = tl.exp2(s_d - m_i[:, None])
-        l_i = tl.sum(p_d, axis=1)
-        acc = tl.dot(p_d.to(tl.bfloat16), v_bf16_d, out_dtype=tl.float32)
+    if LOAD_A:
+        # Load A_i cached by the fwd, skipping the entire sparsity recompute.
+        a_offs = bh_id * stride_h + offs_tok[:, None] * stride_t + offs_d[None, :]
+        A_i = tl.load(AStore + a_offs)
+        A_i = tl.where(q_mask[:, None], A_i, 0.0)
+    else:
+        Q_ptr = Q + bh_id * stride_h
+        q_bf16 = tl.load(Q_ptr + offs_tok[:, None] * stride_t + offs_d[None, :])
 
-    for ci in range(ci_lo, ci_hi - 1):
-        k_block_id = tl.load(CI_ptr + ci)
-        k_start = k_block_id * BS
-        offs_k = k_start + offs_k_tile
-        k_bf16 = tl.load(K_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
-        v_bf16 = tl.load(V_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
-        s = tl.dot(q_bf16, tl.trans(k_bf16), out_dtype=tl.float32) * SCALE_2
-        m_new = tl.maximum(m_i, tl.max(s, axis=1))
-        alpha_scale = tl.exp2(m_i - m_new)
-        p = tl.exp2(s - m_new[:, None])
-        l_i = l_i * alpha_scale + tl.sum(p, axis=1)
-        acc = tl.dot(p.to(tl.bfloat16), v_bf16, acc=acc * alpha_scale[:, None], out_dtype=tl.float32)
-        m_i = m_new
+        m_i = tl.full([BS], float("-inf"), dtype=tl.float32)
+        l_i = tl.zeros([BS], dtype=tl.float32)
+        acc = tl.zeros([BS, D], dtype=tl.float32)
 
-    l_safe = tl.where(l_i > 0, l_i, 1.0)
-    A_i = tl.where(q_mask[:, None], acc / l_safe[:, None], 0.0)
+        rp_base = RowPtr + bh_id * stride_rph + q_block_id
+        ci_lo = tl.load(rp_base)
+        ci_hi = tl.load(rp_base + 1)
+
+        K_ptr = K + bh_id * stride_h
+        V_ptr = V + bh_id * stride_h
+        CI_ptr = ColIdx + bh_id * stride_cih
+
+        offs_k_tile = tl.arange(0, BS)
+        boundary = (q_start + BS) > seq_len
+
+        if ci_hi > ci_lo:
+            k_start_d = q_block_id * BS
+            offs_k_d = k_start_d + offs_k_tile
+            if boundary:
+                k_mask = offs_k_d < seq_len
+                k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
+                v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
+                s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE_2
+                causal = offs_tok[:, None] >= offs_k_d[None, :]
+                s_d = tl.where(causal & k_mask[None, :], s_d, float("-inf"))
+            else:
+                k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
+                v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
+                s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE_2
+                causal = offs_tok[:, None] >= offs_k_d[None, :]
+                s_d = tl.where(causal, s_d, float("-inf"))
+            m_i = tl.max(s_d, axis=1)
+            p_d = tl.exp2(s_d - m_i[:, None])
+            l_i = tl.sum(p_d, axis=1)
+            acc = tl.dot(p_d.to(tl.bfloat16), v_bf16_d, out_dtype=tl.float32)
+
+        for ci in range(ci_lo, ci_hi - 1):
+            k_block_id = tl.load(CI_ptr + ci)
+            k_start = k_block_id * BS
+            offs_k = k_start + offs_k_tile
+            k_bf16 = tl.load(K_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
+            v_bf16 = tl.load(V_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
+            s = tl.dot(q_bf16, tl.trans(k_bf16), out_dtype=tl.float32) * SCALE_2
+            m_new = tl.maximum(m_i, tl.max(s, axis=1))
+            alpha_scale = tl.exp2(m_i - m_new)
+            p = tl.exp2(s - m_new[:, None])
+            l_i = l_i * alpha_scale + tl.sum(p, axis=1)
+            acc = tl.dot(p.to(tl.bfloat16), v_bf16, acc=acc * alpha_scale[:, None], out_dtype=tl.float32)
+            m_i = m_new
+
+        l_safe = tl.where(l_i > 0, l_i, 1.0)
+        A_i = tl.where(q_mask[:, None], acc / l_safe[:, None], 0.0)
 
     W_ptr_base = Proj_Weight + offs_d[:, None] * D + offs_d[None, :]
     W_bf16 = tl.load(W_ptr_base).to(tl.bfloat16)
@@ -346,6 +403,13 @@ def _vortex_chaos_bwd_kernel(
     dA_ptr = dA_total_out + bh_id * stride_h
     tl.store(dA_ptr + offs_tok[:, None] * stride_t + offs_d[None, :], dA_total.to(tl.bfloat16))
 
+    # Di = sum_d(A_i[d] * dA_total[d]) is the row-sum the attn bwd needs to
+    # assemble dS. Computing it here (A_i is already in registers) lets the
+    # attn bwd skip an entire extra K-loop over the sparsity pattern.
+    Di_local = tl.sum(A_i * dA_total, axis=1)
+    Di_local = tl.where(q_mask, Di_local, 0.0)
+    tl.store(Di_out + bh_id * stride_lh + offs_tok, Di_local, mask=q_mask)
+
     W_offs_x = tl.arange(0, D)[:, None]
     W_offs_y = tl.arange(0, D)[None, :]
     tl.atomic_add(dW_workspace + W_offs_x * D + W_offs_y, dW_local)
@@ -363,10 +427,11 @@ def _vortex_chaos_bwd_kernel(
 
 
 @triton.jit
-def _vortex_attn_bwd_kernel(
+def _vortex_attn_bwd_dq_kernel(
     Q, K, V, LSE,
     dA_total,
-    dQ, dK, dV,
+    Di_in,
+    dQ,
     RowPtr, ColIdx, SeqLens,
     stride_cih,
     T_MAX: tl.constexpr,
@@ -414,40 +479,7 @@ def _vortex_attn_bwd_kernel(
     offs_k_tile = tl.arange(0, BS)
     boundary = (q_start + BS) > seq_len
 
-    # D_i = sum(dA_i * A_i) where A_i = softmax(QK) @ V.
-    # Equivalently D_i = sum(dA_i * A_i, dim=-1). Compute via one pass over V.
-    Di = tl.zeros([BS], dtype=tl.float32)
-    if ci_hi > ci_lo:
-        k_start_d = q_block_id * BS
-        offs_k_d = k_start_d + offs_k_tile
-        if boundary:
-            k_mask_d = offs_k_d < seq_len
-            k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask_d[:, None], other=0.0)
-            v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :], mask=k_mask_d[:, None], other=0.0)
-            s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE
-            causal = offs_tok[:, None] >= offs_k_d[None, :]
-            s_d = tl.where(causal & k_mask_d[None, :], s_d, float("-inf"))
-        else:
-            k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
-            v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
-            s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE
-            causal = offs_tok[:, None] >= offs_k_d[None, :]
-            s_d = tl.where(causal, s_d, float("-inf"))
-
-        P_d = tl.exp(s_d - LSE_i[:, None])
-        dP_d = tl.dot(dA_i, tl.trans(v_bf16_d), out_dtype=tl.float32)
-        Di += tl.sum(P_d * dP_d, axis=1)
-
-    for ci in range(ci_lo, ci_hi - 1):
-        k_block_id = tl.load(CI_ptr + ci)
-        k_start = k_block_id * BS
-        offs_k = k_start + offs_k_tile
-        k_bf16 = tl.load(K_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
-        v_bf16 = tl.load(V_ptr + offs_k[:, None] * stride_t + offs_d[None, :])
-        s = tl.dot(q_bf16, tl.trans(k_bf16), out_dtype=tl.float32) * SCALE
-        P = tl.exp(s - LSE_i[:, None])
-        dP = tl.dot(dA_i, tl.trans(v_bf16), out_dtype=tl.float32)
-        Di += tl.sum(P * dP, axis=1)
+    Di = tl.load(Di_in + bh_id * stride_lh + offs_tok, mask=q_mask, other=0.0)
 
     dQ_i = tl.zeros([BS, D], dtype=tl.float32)
 
@@ -462,7 +494,6 @@ def _vortex_attn_bwd_kernel(
             causal = offs_tok[:, None] >= offs_k_d[None, :]
             s_d = tl.where(causal & k_mask_d[None, :], s_d, float("-inf"))
         else:
-            k_mask_d = offs_k_d < T_MAX
             k_bf16_d = tl.load(K_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
             v_bf16_d = tl.load(V_ptr + offs_k_d[:, None] * stride_t + offs_d[None, :])
             s_d = tl.dot(q_bf16, tl.trans(k_bf16_d), out_dtype=tl.float32) * SCALE
@@ -472,20 +503,7 @@ def _vortex_attn_bwd_kernel(
         P_d = tl.exp(s_d - LSE_i[:, None])
         dP_d = tl.dot(dA_i, tl.trans(v_bf16_d), out_dtype=tl.float32)
         dS_d = (P_d * (dP_d - Di[:, None])) * SCALE
-
         dQ_i += tl.dot(dS_d.to(tl.bfloat16), k_bf16_d, out_dtype=tl.float32)
-
-        dK_d = tl.dot(tl.trans(dS_d.to(tl.bfloat16)), q_bf16, out_dtype=tl.float32)
-        dV_d = tl.dot(tl.trans(P_d.to(tl.bfloat16)), dA_i, out_dtype=tl.float32)
-
-        dK_ptr_base = dK + bh_id * stride_h + offs_k_d[:, None] * stride_t + offs_d[None, :]
-        dV_ptr_base = dV + bh_id * stride_h + offs_k_d[:, None] * stride_t + offs_d[None, :]
-        if boundary:
-            tl.atomic_add(dK_ptr_base, dK_d.to(tl.bfloat16), mask=k_mask_d[:, None])
-            tl.atomic_add(dV_ptr_base, dV_d.to(tl.bfloat16), mask=k_mask_d[:, None])
-        else:
-            tl.atomic_add(dK_ptr_base, dK_d.to(tl.bfloat16))
-            tl.atomic_add(dV_ptr_base, dV_d.to(tl.bfloat16))
 
     for ci in range(ci_lo, ci_hi - 1):
         k_block_id = tl.load(CI_ptr + ci)
@@ -497,19 +515,110 @@ def _vortex_attn_bwd_kernel(
         P = tl.exp(s - LSE_i[:, None])
         dP = tl.dot(dA_i, tl.trans(v_bf16), out_dtype=tl.float32)
         dS = (P * (dP - Di[:, None])) * SCALE
-
         dQ_i += tl.dot(dS.to(tl.bfloat16), k_bf16, out_dtype=tl.float32)
-
-        dK_d = tl.dot(tl.trans(dS.to(tl.bfloat16)), q_bf16, out_dtype=tl.float32)
-        dV_d = tl.dot(tl.trans(P.to(tl.bfloat16)), dA_i, out_dtype=tl.float32)
-
-        dK_ptr_base = dK + bh_id * stride_h + offs_k[:, None] * stride_t + offs_d[None, :]
-        dV_ptr_base = dV + bh_id * stride_h + offs_k[:, None] * stride_t + offs_d[None, :]
-        tl.atomic_add(dK_ptr_base, dK_d.to(tl.bfloat16))
-        tl.atomic_add(dV_ptr_base, dV_d.to(tl.bfloat16))
 
     dQ_ptr = dQ + bh_id * stride_h
     tl.store(dQ_ptr + offs_tok[:, None] * stride_t + offs_d[None, :], dQ_i.to(tl.bfloat16), mask=q_mask[:, None])
+
+
+@triton.jit
+def _vortex_attn_bwd_dkv_kernel(
+    Q, K, V, LSE,
+    dA_total,
+    Di_in,
+    dK, dV,
+    RowPtrT, ColIdxT, SeqLens,
+    stride_cith,
+    T_MAX: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    SCALE: tl.constexpr,
+    BS: tl.constexpr,
+    D: tl.constexpr,
+):
+    stride_h: tl.constexpr = T_MAX * D
+    stride_t: tl.constexpr = D
+    stride_rpth: tl.constexpr = (T_MAX // BS) + 1
+    stride_lh: tl.constexpr = T_MAX
+    NUM_K_BLOCKS: tl.constexpr = T_MAX // BS
+
+    pid = tl.program_id(0)
+    bh_id = pid // NUM_K_BLOCKS
+    k_block_id = pid % NUM_K_BLOCKS
+
+    seq_len = tl.load(SeqLens + bh_id // NUM_HEADS)
+    k_start = k_block_id * BS
+    if k_start >= seq_len:
+        return
+
+    offs_d = tl.arange(0, D)
+    offs_tok_k = k_start + tl.arange(0, BS)
+    k_mask = offs_tok_k < seq_len
+
+    K_ptr = K + bh_id * stride_h
+    V_ptr = V + bh_id * stride_h
+    Q_ptr = Q + bh_id * stride_h
+    dA_ptr = dA_total + bh_id * stride_h
+    LSE_ptr = LSE + bh_id * stride_lh
+
+    k_bf16 = tl.load(K_ptr + offs_tok_k[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
+    v_bf16 = tl.load(V_ptr + offs_tok_k[:, None] * stride_t + offs_d[None, :], mask=k_mask[:, None], other=0.0)
+
+    dK_acc = tl.zeros([BS, D], dtype=tl.float32)
+    dV_acc = tl.zeros([BS, D], dtype=tl.float32)
+
+    # Diagonal: Q-block k_block_id attending to K-block k_block_id (causal).
+    q_start_diag = k_block_id * BS
+    offs_tok_q = q_start_diag + tl.arange(0, BS)
+    q_mask_diag = offs_tok_q < seq_len
+    q_bf16_d = tl.load(Q_ptr + offs_tok_q[:, None] * stride_t + offs_d[None, :],
+                       mask=q_mask_diag[:, None], other=0.0)
+    dA_d = tl.load(dA_ptr + offs_tok_q[:, None] * stride_t + offs_d[None, :],
+                   mask=q_mask_diag[:, None], other=0.0)
+    LSE_d = tl.load(LSE_ptr + offs_tok_q, mask=q_mask_diag, other=0.0)
+    Di_d = tl.load(Di_in + bh_id * stride_lh + offs_tok_q, mask=q_mask_diag, other=0.0)
+
+    s_d = tl.dot(q_bf16_d, tl.trans(k_bf16), out_dtype=tl.float32) * SCALE
+    causal_d = offs_tok_q[:, None] >= offs_tok_k[None, :]
+    s_d = tl.where(causal_d & k_mask[None, :] & q_mask_diag[:, None], s_d, float("-inf"))
+    P_d = tl.exp(s_d - LSE_d[:, None])
+    dP_d = tl.dot(dA_d, tl.trans(v_bf16), out_dtype=tl.float32)
+    dS_d = (P_d * (dP_d - Di_d[:, None])) * SCALE
+
+    dK_acc += tl.dot(tl.trans(dS_d.to(tl.bfloat16)), q_bf16_d, out_dtype=tl.float32)
+    dV_acc += tl.dot(tl.trans(P_d.to(tl.bfloat16)), dA_d, out_dtype=tl.float32)
+
+    # Off-diagonal: iterate Q-blocks that attend to this K-block via the
+    # transposed CSR.
+    rpt_base = RowPtrT + bh_id * stride_rpth + k_block_id
+    cit_lo = tl.load(rpt_base)
+    cit_hi = tl.load(rpt_base + 1)
+    CIT_ptr = ColIdxT + bh_id * stride_cith
+
+    for ci in range(cit_lo, cit_hi):
+        q_block_id = tl.load(CIT_ptr + ci)
+        q_start = q_block_id * BS
+        offs_tok_q2 = q_start + tl.arange(0, BS)
+        q_mask2 = offs_tok_q2 < seq_len
+        q_bf16_o = tl.load(Q_ptr + offs_tok_q2[:, None] * stride_t + offs_d[None, :],
+                           mask=q_mask2[:, None], other=0.0)
+        dA_o = tl.load(dA_ptr + offs_tok_q2[:, None] * stride_t + offs_d[None, :],
+                       mask=q_mask2[:, None], other=0.0)
+        LSE_o = tl.load(LSE_ptr + offs_tok_q2, mask=q_mask2, other=0.0)
+        Di_o = tl.load(Di_in + bh_id * stride_lh + offs_tok_q2, mask=q_mask2, other=0.0)
+
+        s_o = tl.dot(q_bf16_o, tl.trans(k_bf16), out_dtype=tl.float32) * SCALE
+        s_o = tl.where(q_mask2[:, None] & k_mask[None, :], s_o, float("-inf"))
+        P_o = tl.exp(s_o - LSE_o[:, None])
+        dP_o = tl.dot(dA_o, tl.trans(v_bf16), out_dtype=tl.float32)
+        dS_o = (P_o * (dP_o - Di_o[:, None])) * SCALE
+
+        dK_acc += tl.dot(tl.trans(dS_o.to(tl.bfloat16)), q_bf16_o, out_dtype=tl.float32)
+        dV_acc += tl.dot(tl.trans(P_o.to(tl.bfloat16)), dA_o, out_dtype=tl.float32)
+
+    dK_ptr = dK + bh_id * stride_h + offs_tok_k[:, None] * stride_t + offs_d[None, :]
+    dV_ptr = dV + bh_id * stride_h + offs_tok_k[:, None] * stride_t + offs_d[None, :]
+    tl.store(dK_ptr, dK_acc.to(tl.bfloat16), mask=k_mask[:, None])
+    tl.store(dV_ptr, dV_acc.to(tl.bfloat16), mask=k_mask[:, None])
 
 
 
@@ -519,6 +628,8 @@ def launch_vortex_fused_bwd(
     do, lse,
     row_ptr, col_idx, seq_lens,
     chaos_store_B=None, chaos_store_T=None,
+    a_store=None,
+    row_ptr_T=None, col_idx_T=None,
 ):
     qshape = q.shape
     batch_size = qshape[0]
@@ -527,15 +638,19 @@ def launch_vortex_fused_bwd(
     batch_heads = batch_size * num_heads
     num_q_blocks = t_max // BLOCK_SIZE
 
-    dq = torch.zeros_like(q)
-    dk = torch.zeros_like(k)
-    dv = torch.zeros_like(v)
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
     da_total = torch.empty_like(q)
 
     dw_workspace = torch.zeros_like(proj_weight, dtype=torch.float32)
     dscalars_workspace = torch.zeros_like(chaos_scalars, dtype=torch.float32)
     dmixer_workspace = torch.zeros_like(mixer_gate, dtype=torch.float32)
     dperturb_workspace = torch.zeros_like(chaos_perturb, dtype=torch.float32)
+
+    # Di = row-sum of A_i * dA_i, computed in chaos_bwd from in-register A_i
+    # and reused by attn_bwd so it does not have to re-run the sparsity loop.
+    di_scratch = torch.empty((batch_heads, t_max), device=q.device, dtype=torch.float32)
 
     # Determine whether the fwd populated the scratch. If not, pass 1-elem
     # placeholders; the kernel never dereferences them when LOAD_CHAOS=0.
@@ -545,17 +660,33 @@ def launch_vortex_fused_bwd(
         chaos_store_B = torch.empty(1, device=q.device, dtype=torch.float32)
         chaos_store_T = torch.empty(1, device=q.device, dtype=torch.float32)
 
+    load_a = bool(a_store is not None and a_store.numel() > 1)
+    if not load_a:
+        a_store = torch.empty(1, device=q.device, dtype=torch.float32)
+
+    # Transposed CSR for K-parallel dK/dV. Builds on demand if the caller did
+    # not pre-compute one (cheap for typical shapes, but callers should cache).
+    if row_ptr_T is None or col_idx_T is None:
+        row_ptr_T, col_idx_T = build_attn_bwd_csrT(row_ptr, col_idx, num_q_blocks)
+
     grid = (num_q_blocks * batch_heads,)
     stride_cih = col_idx.shape[2] if col_idx.ndim == 3 else col_idx.shape[1]
+    stride_cith = col_idx_T.shape[2] if col_idx_T.ndim == 3 else col_idx_T.shape[1]
 
+    if _BWD_PROFILE:
+        ev_c0 = torch.cuda.Event(enable_timing=True); ev_c1 = torch.cuda.Event(enable_timing=True)
+        ev_a0 = torch.cuda.Event(enable_timing=True); ev_a1 = torch.cuda.Event(enable_timing=True)
+        ev_c0.record()
     _vortex_chaos_bwd_kernel[grid](
         q, k, v,
         proj_weight, chaos_scalars, mixer_gate, chaos_perturb,
         do,
         da_total,
+        di_scratch,
         dw_workspace, dscalars_workspace, dmixer_workspace, dperturb_workspace,
         row_ptr, col_idx, seq_lens,
         chaos_store_B, chaos_store_T,
+        a_store,
         stride_cih,
         T_MAX=t_max,
         NUM_HEADS=num_heads,
@@ -564,14 +695,20 @@ def launch_vortex_fused_bwd(
         D=HEAD_DIM,
         CHAOS_DEPTH=CHAOS_DEPTH,
         LOAD_CHAOS=int(load_chaos),
+        LOAD_A=int(load_a),
         num_stages=_BWD_CHAOS_NUM_STAGES,
         num_warps=_BWD_CHAOS_NUM_WARPS,
     )
-
-    _vortex_attn_bwd_kernel[grid](
+    if _BWD_PROFILE:
+        ev_c1.record()
+        ev_dq0 = torch.cuda.Event(enable_timing=True); ev_dq1 = torch.cuda.Event(enable_timing=True)
+        ev_dkv0 = torch.cuda.Event(enable_timing=True); ev_dkv1 = torch.cuda.Event(enable_timing=True)
+        ev_dq0.record()
+    _vortex_attn_bwd_dq_kernel[grid](
         q, k, v, lse,
         da_total,
-        dq, dk, dv,
+        di_scratch,
+        dq,
         row_ptr, col_idx, seq_lens,
         stride_cih,
         T_MAX=t_max,
@@ -582,6 +719,28 @@ def launch_vortex_fused_bwd(
         num_stages=_BWD_ATTN_NUM_STAGES,
         num_warps=_BWD_ATTN_NUM_WARPS,
     )
+    if _BWD_PROFILE:
+        ev_dq1.record(); ev_dkv0.record()
+    _vortex_attn_bwd_dkv_kernel[grid](
+        q, k, v, lse,
+        da_total,
+        di_scratch,
+        dk, dv,
+        row_ptr_T, col_idx_T, seq_lens,
+        stride_cith,
+        T_MAX=t_max,
+        NUM_HEADS=num_heads,
+        SCALE=1.0 / math.sqrt(HEAD_DIM),
+        BS=BLOCK_SIZE,
+        D=HEAD_DIM,
+        num_stages=_BWD_ATTN_DKV_NUM_STAGES,
+        num_warps=_BWD_ATTN_DKV_NUM_WARPS,
+    )
+    if _BWD_PROFILE:
+        ev_dkv1.record(); torch.cuda.synchronize()
+        print(f"[bwd_profile] chaos={ev_c0.elapsed_time(ev_c1):.3f}ms  "
+              f"attn_dq={ev_dq0.elapsed_time(ev_dq1):.3f}ms  "
+              f"attn_dkv={ev_dkv0.elapsed_time(ev_dkv1):.3f}ms", flush=True)
 
     # Apply softmax Jacobian to dmixer grads accumulated in pre-softmax space.
     with torch.no_grad():

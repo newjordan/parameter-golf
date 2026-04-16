@@ -22,6 +22,7 @@ def _vortex_helix_fwd_kernel(
     RowPtr, ColIdx, SeqLens,
     ChaosStore_B,     # [BH, CHAOS_DEPTH, T_MAX, D] fp32, or 1-elem placeholder
     ChaosStore_T,     # [BH, CHAOS_DEPTH, T_MAX, D] fp32, or 1-elem placeholder
+    AStore,           # [BH, T_MAX, D] fp32 cache of A_i for bwd recompute skip
     stride_cih,
     T_MAX: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -30,6 +31,7 @@ def _vortex_helix_fwd_kernel(
     D: tl.constexpr,
     CHAOS_DEPTH: tl.constexpr,
     STORE_CHAOS: tl.constexpr,
+    STORE_A: tl.constexpr,
 ):
     stride_h: tl.constexpr = T_MAX * D
     stride_t: tl.constexpr = D
@@ -122,6 +124,10 @@ def _vortex_helix_fwd_kernel(
     a = tl.where(q_mask[:, None], acc / l_safe[:, None], 0.0) # Stream A
     lse_out = tl.where(q_mask, (m_i + tl.log2(l_safe)) * LN2, float("-inf"))
 
+    if STORE_A:
+        a_store_offs = bh_id * T_MAX * D + offs_tok[:, None] * D + offs_d[None, :]
+        tl.store(AStore + a_store_offs, a)
+
     # VORTEX FUSION START
     # Load Projection Weight for Stream B (D x D)
     W_offs_x = tl.arange(0, D)[:, None]
@@ -213,6 +219,10 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
         chaos_store_B = torch.empty(1, device=q.device, dtype=torch.float32)
         chaos_store_T = torch.empty(1, device=q.device, dtype=torch.float32)
 
+    # A_i scratch: zero-init so masked/OOB rows read back as 0 in bwd.
+    a_store = torch.zeros((batch_heads, t_max, HEAD_DIM),
+                          device=q.device, dtype=torch.float32)
+
     grid = (num_q_blocks * batch_heads,)
 
     _vortex_helix_fwd_kernel[grid](
@@ -221,6 +231,7 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
         o, lse_2d,
         row_ptr, col_idx, seq_lens,
         chaos_store_B, chaos_store_T,
+        a_store,
         col_idx.shape[2] if col_idx.ndim == 3 else col_idx.shape[1],
         T_MAX=t_max,
         NUM_HEADS=num_heads,
@@ -229,7 +240,8 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
         D=HEAD_DIM,
         CHAOS_DEPTH=CHAOS_DEPTH,
         STORE_CHAOS=CHAOS_STORE,
+        STORE_A=1,
         num_stages=_FWD_NUM_STAGES,
         num_warps=_FWD_NUM_WARPS,
     )
-    return o, lse_3d, chaos_store_B, chaos_store_T
+    return o, lse_3d, chaos_store_B, chaos_store_T, a_store
