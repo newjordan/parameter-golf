@@ -633,11 +633,28 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.proj = CastedLinear(dim, dim, bias=True)
-        self.chaos_scalars = nn.Parameter(torch.randn(3))
+        # SIREN-style chaos scalar init (gated by CHAOS_SIREN_OMEGA0).
+        # Kernel expects chaos_scalars = [alpha, beta, phi] (see vortex_fused.py
+        # chaos loop: alpha_val/beta_val/phi_val at offsets 0/1/2).
+        _chaos_siren_omega0 = os.environ.get("CHAOS_SIREN_OMEGA0", None)
+        if _chaos_siren_omega0 is not None:
+            omega0 = float(_chaos_siren_omega0)
+            alpha = torch.empty(1).uniform_(-0.05, 0.05)
+            beta = torch.empty(1).uniform_(omega0 * 0.5, omega0 * 1.5)
+            phi = torch.empty(1).uniform_(-math.pi, math.pi)
+            self.chaos_scalars = nn.Parameter(torch.cat([alpha, beta, phi]))
+        else:
+            self.chaos_scalars = nn.Parameter(torch.randn(3))
         self.mixer_gate = nn.Parameter(torch.randn(3))
         self.chaos_perturb = nn.Parameter(torch.randn(1))
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
+        # Optional eager relu² MLP branch (gated by ADD_MLP=1) to add capacity beyond vortex attn-mix.
+        self._add_mlp = os.environ.get("ADD_MLP", "0") == "1"
+        if self._add_mlp:
+            self.mlp_norm = RMSNorm()
+            self.mlp = MLP(dim, mlp_mult)
+            self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
 
     def forward(self, x: Tensor, x0: Tensor) -> Tensor:
         mix = self.resid_mix.to(dtype=x.dtype)
@@ -654,6 +671,11 @@ class Block(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.attn.q_gain.to(dtype=q.dtype)[None, :, None, None]
+
+        if self.attn.num_kv_heads != self.attn.num_heads:
+            rep = self.attn.num_heads // self.attn.num_kv_heads
+            k = k.repeat_interleave(rep, dim=1).contiguous()
+            v = v.repeat_interleave(rep, dim=1).contiguous()
 
         # Fake CSR structures for standard causal attention
         # In a real setup, we would build actual Block-Sparse CSR structures
@@ -672,6 +694,16 @@ class Block(nn.Module):
         else:
             proj_weight_hd = self.proj.weight
 
+        if os.environ.get("VORTEX_DEBUG_SHAPES", "0") == "1":
+            import sys
+            print(f"[VORTEX_DBG] q={tuple(q.shape)} q.stride={q.stride()} q.contig={q.is_contiguous()} "
+                  f"k={tuple(k.shape)} k.stride={k.stride()} k.contig={k.is_contiguous()} "
+                  f"v={tuple(v.shape)} v.stride={v.stride()} v.contig={v.is_contiguous()} "
+                  f"proj_weight={tuple(proj_weight_hd.shape)} proj_weight.contig={proj_weight_hd.is_contiguous()} "
+                  f"row_ptr={tuple(row_ptr.shape)} col_idx={tuple(col_idx.shape)} seq_lens={tuple(seq_lens.shape)} "
+                  f"dim={dim} head_dim={self.attn.head_dim}", flush=True, file=sys.stderr)
+        q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
+        proj_weight_hd = proj_weight_hd.contiguous()
         mixed = VortexHelixFunction.apply(
             q, k, v,
             proj_weight_hd,
@@ -690,6 +722,8 @@ class Block(nn.Module):
         # out_final = M + perturb * sin(M)
         # So we just need to do the residual connection.
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * mixed
+        if self._add_mlp:
+            x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
 
 
@@ -715,6 +749,11 @@ class GPT(nn.Module):
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        # Optional stochastic first-layer noise injection (gated by FIRST_LAYER_NOISE env var).
+        # Modes: off (default, bit-identical no-op), flat, brazil, token_seeded.
+        self._first_layer_noise_mode = os.environ.get("FIRST_LAYER_NOISE", "off")
+        self._first_layer_noise_sigma = float(os.environ.get("FIRST_LAYER_NOISE_SIGMA", "0.1"))
+        self._first_layer_noise_step = 0
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -747,6 +786,26 @@ class GPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
+        # Stochastic first-layer noise injection. Only active during training.
+        # When FIRST_LAYER_NOISE=off (default), this branch is skipped entirely
+        # so numerics are bit-identical to the unpatched code path.
+        if self._first_layer_noise_mode != "off" and self.training:
+            sigma = self._first_layer_noise_sigma
+            mode = self._first_layer_noise_mode
+            if mode == "flat":
+                x = x + sigma * torch.randn_like(x)
+            elif mode == "brazil":
+                x = x + sigma * torch.randn_like(x) * x.abs().pow(0.5)
+            elif mode == "token_seeded":
+                # Deterministic, content-dependent noise. Seeded by (step XOR token_id sum).
+                # Uses a module-local step counter (incremented each training call)
+                # since the trainer's `step` variable isn't in scope here.
+                seed = int(self._first_layer_noise_step) ^ int(input_ids.sum().item())
+                gen = torch.Generator(device=x.device)
+                gen.manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
+                noise = torch.randn(x.shape, generator=gen, device=x.device, dtype=x.dtype)
+                x = x + sigma * noise
+                self._first_layer_noise_step += 1
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
@@ -889,7 +948,7 @@ def main() -> None:
             module.float()
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = base_model
-    model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+    model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True) if distributed else compiled_model
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1037,9 +1096,12 @@ def main() -> None:
                 has_leading_space_lut,
                 is_boundary_token_lut,
             )
+            _step_avg_ms = training_time_ms / max(step, 1)
+            _toks_per_sec = args.train_batch_tokens * 1000.0 / max(_step_avg_ms, 1e-9)
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
-                f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms"
+                f"train_time:{training_time_ms:.0f}ms step_avg:{_step_avg_ms:.2f}ms "
+                f"tok_per_sec:{_toks_per_sec:,.0f}"
             )
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -1088,9 +1150,12 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
+            _step_avg_ms = approx_training_time_ms / step
+            _toks_per_sec = args.train_batch_tokens * 1000.0 / max(_step_avg_ms, 1e-9)
             log0(
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{_step_avg_ms:.2f}ms "
+                f"tok_per_sec:{_toks_per_sec:,.0f}"
             )
 
         # Needed to sync whether we've reached the wallclock cap.
