@@ -214,6 +214,10 @@ class Hyperparameters:
     sink_token_enabled = bool(int(os.environ.get("SINK_TOKEN", "0")))
     # Fused RMSNorm: combine residual add + RMSNorm for better torch.compile fusion.
     fused_norm = bool(int(os.environ.get("FUSED_NORM", "0")))
+    # Vortex: chaotic perturbation + fractal echo + 3-way mixer in the crawler loop.
+    vortex_chaos = bool(int(os.environ.get("VORTEX_CHAOS", "0")))
+    vortex_fractal = bool(int(os.environ.get("VORTEX_FRACTAL", "0")))
+    vortex_mixer = bool(int(os.environ.get("VORTEX_MIXER", "0")))
 
 
 def _parse_int_tuple(raw: str, fallback: tuple[int, ...]) -> tuple[int, ...]:
@@ -1706,6 +1710,9 @@ class CrawlerGPT(nn.Module):
         crawler_compute_staged: bool = False,
         sink_token_enabled: bool = False,
         fused_norm: bool = False,
+        vortex_chaos: bool = False,
+        vortex_fractal: bool = False,
+        vortex_mixer: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)
@@ -1818,6 +1825,34 @@ class CrawlerGPT(nn.Module):
         self.delta_net = None
         # Loop smear gate: blends each loop output with previous loop output
         self.loop_smear = LoopSmearGate(model_dim) if (num_crawler_layers > 0 and crawler_loop_smear) else None
+        # Vortex: Chaotic attractor — per-loop sinusoidal perturbation of crawler hidden state.
+        # alpha (magnitude, init 0 → warm start), beta (frequency, init 2), phi (per-dim phase).
+        # Applied after each crawler block within a loop: x += alpha * sin(beta * x + phi).
+        if vortex_chaos and num_crawler_layers > 0:
+            self.vortex_alpha = nn.Parameter(torch.zeros(crawler_loops))
+            self.vortex_beta = nn.Parameter(torch.full((crawler_loops,), 2.0))
+            self.vortex_phi = nn.Parameter(torch.randn(crawler_loops, model_dim) * 0.1)
+        else:
+            self.vortex_alpha = None
+            self.vortex_beta = None
+            self.vortex_phi = None
+        # Vortex: Fractal echo — per-loop scaled injection of pre-crawler encoder state.
+        # Creates a direct "memory" residual so later loops can recall raw encoder output.
+        if vortex_fractal and num_crawler_layers > 0:
+            self.vortex_echo_scale = nn.Parameter(torch.zeros(crawler_loops))
+        else:
+            self.vortex_echo_scale = None
+        # Vortex: 3-way mixer — per-loop learned gate over [prev_loop, current_loop, encoder].
+        # Replaces loop smear when active. Init zeros → uniform 1/3 softmax (equal blend warm start).
+        if vortex_mixer and num_crawler_layers > 0:
+            self.vortex_gate = nn.ModuleList([
+                nn.Linear(model_dim * 3, 3, bias=False)
+                for _ in range(crawler_loops)
+            ])
+            for g in self.vortex_gate:
+                nn.init.zeros_(g.weight)
+        else:
+            self.vortex_gate = None
         # BW7: Delta Anchor — per-loop causal write state.
         # anchor_write[loop]: model_dim → anchor_dim (commit what this loop extracted)
         # anchor_read[loop]: anchor_dim → model_dim (inject previous loop's committed state)
@@ -2047,6 +2082,12 @@ class CrawlerGPT(nn.Module):
                 block = self.crawler_blocks[ci]
                 ve = self._get_crawler_ve(ci, input_ids, ve_cache)
                 x_loop = block(x_loop, x0, v_embed=ve, loop_idx=loop, cos_sin=lcs)
+                # Vortex: chaotic perturbation after each crawler block
+                if self.vortex_alpha is not None:
+                    _va = self.vortex_alpha[loop].to(dtype=x_loop.dtype)
+                    _vb = self.vortex_beta[loop].to(dtype=x_loop.dtype)
+                    _vp = self.vortex_phi[loop].to(dtype=x_loop.dtype)
+                    x_loop = x_loop + _va * torch.sin(_vb * x_loop + _vp)
             # DeltaNet: causal within-loop associative memory; state NOT carried between loops.
             # Cross-loop carry violates causality: final state from loop N encodes all positions
             # 0..T-1, leaking future token information into loop N+1 at every position t < T-1.
@@ -2054,7 +2095,18 @@ class CrawlerGPT(nn.Module):
             # a single call (processes tokens 0..T-1 left-to-right).
             if self.delta_net is not None:
                 x_loop, _ = self.delta_net(x_loop, None)
-            if self.loop_smear is not None:
+            # Vortex: fractal echo — inject scaled encoder memory into loop state
+            if self.vortex_echo_scale is not None:
+                _ves = self.vortex_echo_scale[loop].to(dtype=x_loop.dtype)
+                x_loop = x_loop + _ves * x_pre_crawler
+            # Vortex: 3-way mixer replaces loop smear when active
+            if self.vortex_gate is not None:
+                _vcat = torch.cat([x_prev_loop, x_loop, x_pre_crawler], dim=-1)
+                _vgates = F.softmax(self.vortex_gate[loop](_vcat), dim=-1)
+                x_loop = (_vgates[..., 0:1] * x_prev_loop
+                          + _vgates[..., 1:2] * x_loop
+                          + _vgates[..., 2:3] * x_pre_crawler)
+            elif self.loop_smear is not None:
                 x_loop = self.loop_smear(x_loop, x_prev_loop)
             # BW7: Delta Anchor write — commit this loop's output state for the next loop
             if self.anchor_write is not None:
@@ -2233,6 +2285,9 @@ def build_model(args: Hyperparameters, device: torch.device) -> nn.Module:
             crawler_compute_staged=args.crawler_compute_staged,
             sink_token_enabled=args.sink_token_enabled,
             fused_norm=args.fused_norm,
+            vortex_chaos=args.vortex_chaos,
+            vortex_fractal=args.vortex_fractal,
+            vortex_mixer=args.vortex_mixer,
         )
     else:
         model = GPT(
