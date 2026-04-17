@@ -9,3 +9,15 @@ data/docs_selected.jsonl
 .mypy_cache/
 .venv
 logs/
+
+# Model weight artifacts — kept locally only, never in git.
+final_model.pt
+final_model.*.ptz
+**/final_model.pt
+**/final_model.*.ptz
+
+# Pod snapshots (rsynced from vast.ai) — keep out of git.
+pod_snapshot_*/
+
+# Dated crawler snapshots (too large for git).
+crawler/2026-*/
