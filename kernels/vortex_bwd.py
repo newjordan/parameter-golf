@@ -211,7 +211,7 @@ def _vortex_chaos_bwd_kernel(
             T1 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_1 = tl.exp(2.0 * tl.dot(B0_bf16, W_bf16, out_dtype=tl.float32))
-            T1 = (e_2x_1 - 1.0) / (e_2x_1 + 1.0)
+            T1 = 1.0 - 2.0 / (e_2x_1 + 1.0)
         S1 = tl.sin(beta_val * B0 + phi_val)
         B1 = T1 + alpha_val * S1
         B1_bf16 = B1.to(tl.bfloat16)
@@ -223,7 +223,7 @@ def _vortex_chaos_bwd_kernel(
             T2 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_2 = tl.exp(2.0 * tl.dot(B1_bf16, W_bf16, out_dtype=tl.float32))
-            T2 = (e_2x_2 - 1.0) / (e_2x_2 + 1.0)
+            T2 = 1.0 - 2.0 / (e_2x_2 + 1.0)
         S2 = tl.sin(beta_val * B1 + phi_val)
         B2 = T2 + alpha_val * S2
         B2_bf16 = B2.to(tl.bfloat16)
@@ -235,7 +235,7 @@ def _vortex_chaos_bwd_kernel(
             T3 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_3 = tl.exp(2.0 * tl.dot(B2_bf16, W_bf16, out_dtype=tl.float32))
-            T3 = (e_2x_3 - 1.0) / (e_2x_3 + 1.0)
+            T3 = 1.0 - 2.0 / (e_2x_3 + 1.0)
         S3 = tl.sin(beta_val * B2 + phi_val)
         B3 = T3 + alpha_val * S3
         B3_bf16 = B3.to(tl.bfloat16)
@@ -247,7 +247,7 @@ def _vortex_chaos_bwd_kernel(
             T4 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_4 = tl.exp(2.0 * tl.dot(B3_bf16, W_bf16, out_dtype=tl.float32))
-            T4 = (e_2x_4 - 1.0) / (e_2x_4 + 1.0)
+            T4 = 1.0 - 2.0 / (e_2x_4 + 1.0)
         S4 = tl.sin(beta_val * B3 + phi_val)
         B4 = T4 + alpha_val * S4
         B4_bf16 = B4.to(tl.bfloat16)
@@ -259,7 +259,7 @@ def _vortex_chaos_bwd_kernel(
             T5 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_5 = tl.exp(2.0 * tl.dot(B4_bf16, W_bf16, out_dtype=tl.float32))
-            T5 = (e_2x_5 - 1.0) / (e_2x_5 + 1.0)
+            T5 = 1.0 - 2.0 / (e_2x_5 + 1.0)
         S5 = tl.sin(beta_val * B4 + phi_val)
         B5 = T5 + alpha_val * S5
         B5_bf16 = B5.to(tl.bfloat16)
@@ -271,7 +271,7 @@ def _vortex_chaos_bwd_kernel(
             T6 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_6 = tl.exp(2.0 * tl.dot(B5_bf16, W_bf16, out_dtype=tl.float32))
-            T6 = (e_2x_6 - 1.0) / (e_2x_6 + 1.0)
+            T6 = 1.0 - 2.0 / (e_2x_6 + 1.0)
         S6 = tl.sin(beta_val * B5 + phi_val)
         B6 = T6 + alpha_val * S6
         B6_bf16 = B6.to(tl.bfloat16)
@@ -283,7 +283,7 @@ def _vortex_chaos_bwd_kernel(
             T7 = tl.load(ChaosStore_T + cs_offs)
         else:
             e_2x_7 = tl.exp(2.0 * tl.dot(B6_bf16, W_bf16, out_dtype=tl.float32))
-            T7 = (e_2x_7 - 1.0) / (e_2x_7 + 1.0)
+            T7 = 1.0 - 2.0 / (e_2x_7 + 1.0)
         S7 = tl.sin(beta_val * B6 + phi_val)
         B7 = T7 + alpha_val * S7
 
@@ -639,6 +639,7 @@ def launch_vortex_fused_bwd(
     batch_size = qshape[0]
     num_heads = qshape[1]
     t_max = qshape[2]
+    head_dim = qshape[3]
     batch_heads = batch_size * num_heads
     num_q_blocks = t_max // BLOCK_SIZE
 
@@ -694,9 +695,9 @@ def launch_vortex_fused_bwd(
         stride_cih,
         T_MAX=t_max,
         NUM_HEADS=num_heads,
-        SCALE=1.0 / math.sqrt(HEAD_DIM),
+        SCALE=1.0 / math.sqrt(head_dim),
         BS=BLOCK_SIZE,
-        D=HEAD_DIM,
+        D=head_dim,
         CHAOS_DEPTH=CHAOS_DEPTH,
         LOAD_CHAOS=int(load_chaos),
         LOAD_A=int(load_a),
@@ -717,9 +718,9 @@ def launch_vortex_fused_bwd(
         stride_cih,
         T_MAX=t_max,
         NUM_HEADS=num_heads,
-        SCALE=1.0 / math.sqrt(HEAD_DIM),
+        SCALE=1.0 / math.sqrt(head_dim),
         BS=BLOCK_SIZE,
-        D=HEAD_DIM,
+        D=head_dim,
         num_stages=_BWD_ATTN_NUM_STAGES,
         num_warps=_BWD_ATTN_NUM_WARPS,
     )
@@ -734,9 +735,9 @@ def launch_vortex_fused_bwd(
         stride_cith,
         T_MAX=t_max,
         NUM_HEADS=num_heads,
-        SCALE=1.0 / math.sqrt(HEAD_DIM),
+        SCALE=1.0 / math.sqrt(head_dim),
         BS=BLOCK_SIZE,
-        D=HEAD_DIM,
+        D=head_dim,
         num_stages=_BWD_ATTN_DKV_NUM_STAGES,
         num_warps=_BWD_ATTN_DKV_NUM_WARPS,
     )

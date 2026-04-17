@@ -157,9 +157,9 @@ def _vortex_helix_fwd_kernel(
             tl.store(ChaosStore_B + store_offs, b_fp32)
         b_bf16 = b_fp32.to(tl.bfloat16)
         b_proj = tl.dot(b_bf16, W, out_dtype=tl.float32)
-        # Using sigmoid approximation for tanh to ensure compatibility: tanh(x) = 2*sigmoid(2x) - 1
+        # NaN-safe tanh: tanh(x) = 1 - 2/(exp(2x)+1). exp(2x)=+inf yields 1, not NaN.
         e_2x = tl.exp(2.0 * b_proj)
-        b_tanh = (e_2x - 1.0) / (e_2x + 1.0)
+        b_tanh = 1.0 - 2.0 / (e_2x + 1.0)
         if STORE_CHAOS:
             store_offs = (bh_id * stride_cs_bh + i_step * stride_cs_i
                           + offs_tok[:, None] * D + offs_d[None, :])
@@ -202,6 +202,7 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
     batch_size = qshape[0]
     num_heads = qshape[1]
     t_max = qshape[2]
+    head_dim = qshape[3]
     batch_heads = batch_size * num_heads
     num_q_blocks = t_max // BLOCK_SIZE
 
@@ -210,9 +211,9 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
     lse_2d = lse_3d.view(batch_heads, t_max)
 
     if CHAOS_STORE and CHAOS_DEPTH > 0:
-        chaos_store_B = torch.empty((batch_heads, CHAOS_DEPTH, t_max, HEAD_DIM),
+        chaos_store_B = torch.empty((batch_heads, CHAOS_DEPTH, t_max, head_dim),
                                     device=q.device, dtype=torch.float32)
-        chaos_store_T = torch.empty((batch_heads, CHAOS_DEPTH, t_max, HEAD_DIM),
+        chaos_store_T = torch.empty((batch_heads, CHAOS_DEPTH, t_max, head_dim),
                                     device=q.device, dtype=torch.float32)
     else:
         # 1-elem placeholders; kernel never dereferences them when STORE_CHAOS=0.
@@ -220,7 +221,7 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
         chaos_store_T = torch.empty(1, device=q.device, dtype=torch.float32)
 
     # A_i scratch: zero-init so masked/OOB rows read back as 0 in bwd.
-    a_store = torch.zeros((batch_heads, t_max, HEAD_DIM),
+    a_store = torch.zeros((batch_heads, t_max, head_dim),
                           device=q.device, dtype=torch.float32)
 
     grid = (num_q_blocks * batch_heads,)
@@ -235,9 +236,9 @@ def launch_vortex_fused(q, k, v, proj_weight, chaos_scalars, mixer_gate, chaos_p
         col_idx.shape[2] if col_idx.ndim == 3 else col_idx.shape[1],
         T_MAX=t_max,
         NUM_HEADS=num_heads,
-        SCALE=1.0 / math.sqrt(HEAD_DIM),
+        SCALE=1.0 / math.sqrt(head_dim),
         BS=BLOCK_SIZE,
-        D=HEAD_DIM,
+        D=head_dim,
         CHAOS_DEPTH=CHAOS_DEPTH,
         STORE_CHAOS=CHAOS_STORE,
         STORE_A=1,
