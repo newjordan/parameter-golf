@@ -633,11 +633,24 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.proj = CastedLinear(dim, dim, bias=True)
-        # SIREN-style chaos scalar init (gated by CHAOS_SIREN_OMEGA0).
-        # Kernel expects chaos_scalars = [alpha, beta, phi] (see vortex_fused.py
-        # chaos loop: alpha_val/beta_val/phi_val at offsets 0/1/2).
+        # chaos_scalars = [alpha, beta, phi] (kernel offsets 0/1/2 in vortex_fused.py).
+        # CHAOS_SCALAR_MODE (preferred, takes precedence):
+        #   "randn"         -> torch.randn(3) (legacy default)
+        #   "conservative"  -> alpha~U(-0.10,0.10), beta~U(0.8,1.2), phi~U(-pi,pi)
+        #                     (ChatGPT deep research 2026-04-17; v16 empirical +
+        #                      theory agree that beta>>1 destabilizes the tied loop)
+        # CHAOS_SIREN_OMEGA0 (legacy): alpha~U(-0.05,0.05), beta~U(w/2,3w/2), phi~U(-pi,pi).
+        #                              Known catastrophic for omega0 >= 10 (v16 data).
+        _chaos_scalar_mode = os.environ.get("CHAOS_SCALAR_MODE", None)
         _chaos_siren_omega0 = os.environ.get("CHAOS_SIREN_OMEGA0", None)
-        if _chaos_siren_omega0 is not None:
+        if _chaos_scalar_mode == "conservative":
+            alpha = torch.empty(1).uniform_(-0.10, 0.10)
+            beta = torch.empty(1).uniform_(0.8, 1.2)
+            phi = torch.empty(1).uniform_(-math.pi, math.pi)
+            self.chaos_scalars = nn.Parameter(torch.cat([alpha, beta, phi]))
+        elif _chaos_scalar_mode == "randn" or (_chaos_scalar_mode is None and _chaos_siren_omega0 is None):
+            self.chaos_scalars = nn.Parameter(torch.randn(3))
+        elif _chaos_siren_omega0 is not None:
             omega0 = float(_chaos_siren_omega0)
             alpha = torch.empty(1).uniform_(-0.05, 0.05)
             beta = torch.empty(1).uniform_(omega0 * 0.5, omega0 * 1.5)
