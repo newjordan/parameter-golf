@@ -11,13 +11,21 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import numpy as np
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
+
+from parameter_golf.numpy_compat import cast_array
+from parameter_golf.shards import write_shard
 
 
 DOCS_FILENAME = "docs_selected.jsonl"
@@ -50,7 +58,8 @@ class PureByteTokenizer:
 
     def encode(self, text: str) -> np.ndarray:
         data = text.encode("utf-8", errors="replace")
-        return np.frombuffer(data, dtype=np.uint8).astype(np.uint16, copy=False) + self.byte_offset
+        raw = np.frombuffer(data, dtype=np.uint8)
+        return cast_array(raw, np.uint16) + np.uint16(self.byte_offset)
 
     def encode_batch(self, texts: list[str]) -> list[np.ndarray]:
         return [self.encode(text) for text in texts]
@@ -110,14 +119,21 @@ def copy_from_hf_cache(*, repo_id: str, remote_root: str, filename: str, destina
 
 
 def iter_docs(path: Path):
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            yield json.loads(line)["text"]
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_no}: invalid JSON") from exc
+            if not isinstance(payload, dict) or "text" not in payload or not isinstance(payload["text"], str):
+                raise ValueError(f"{path}:{line_no}: document object must include a string text field")
+            yield payload["text"]
 
 
 def count_docs(path: Path) -> int:
-    with path.open("r", encoding="utf-8") as f:
-        return sum(1 for _ in f)
+    return sum(1 for _ in iter_docs(path))
 
 
 def batched_docs_jsonl(path: Path, batch_size: int):
@@ -132,22 +148,7 @@ def batched_docs_jsonl(path: Path, batch_size: int):
 
 
 def write_datafile(path: Path, toks: Any) -> None:
-    if len(toks) >= 2**31:
-        raise ValueError("token count too large")
-    header = np.zeros(256, dtype="<i4")
-    header[0] = DATAFILE_MAGIC
-    header[1] = DATAFILE_VERSION
-    header[2] = len(toks)
-    toks = np.asarray(toks)
-    if toks.dtype != np.uint16:
-        if not ((0 <= toks).all() and (toks < 2**16).all()):
-            raise ValueError("token dictionary too large for uint16")
-        toks = toks.astype("<u2", copy=False)
-    else:
-        toks = toks.astype("<u2", copy=False)
-    with path.open("wb") as f:
-        f.write(header.tobytes())
-        f.write(toks.tobytes())
+    write_shard(Path(path), toks)
 
 
 def relativize_manifest_paths(value: Any, root: Path) -> Any:
@@ -218,13 +219,12 @@ def write_tokenizer_config_export(output_root: Path, selected_specs: list[dict[s
 
 
 def _iter_sentencepiece_text(docs_jsonl: Path, *, max_docs: int | None = None):
-    with docs_jsonl.open("r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if max_docs is not None and i >= max_docs:
-                break
-            text = json.loads(line)["text"].replace("\x00", " ").strip()
-            if text:
-                yield text
+    for index, text in enumerate(iter_docs(docs_jsonl)):
+        if max_docs is not None and index >= max_docs:
+            break
+        cleaned = text.replace("\x00", " ").strip()
+        if cleaned:
+            yield cleaned
 
 
 def build_pure_byte_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path) -> dict[str, Any]:
@@ -370,7 +370,7 @@ def export_shards(
             if not ((0 <= toks).all() and (toks < vocab_size).all()):
                 bad = int(toks[(toks < 0) | (toks >= vocab_size)][0])
                 raise ValueError(f"token id {bad} outside declared vocab_size={vocab_size}")
-            toks = toks.astype("<u2", copy=False)
+            toks = cast_array(toks, "<u2")
 
             stats["docs_total"] += 1
             stats[f"docs_{split}"] += 1

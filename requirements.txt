@@ -1,10 +1,13 @@
-numpy
-tqdm
-torch
-huggingface-hub
+# CUDA training reference for train_gpt.py.
+# The research hub and pytest suite do not install this file.
+# For those, use: python -m pip install -e ".[dev]"
+numpy>=2.1
+tqdm>=4.67
+torch>=2.5
+huggingface-hub>=0.26
+datasets>=3.1
+tiktoken>=0.8
+sentencepiece>=0.2
+typing-extensions>=4.12
 kernels
-setuptools
-typing-extensions==4.15.0
-datasets
-tiktoken
-sentencepiece
+setuptools>=70

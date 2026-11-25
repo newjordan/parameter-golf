@@ -1,3 +1,8 @@
+const HubView = window.HubView;
+if (!HubView) {
+  throw new Error("hub/view_model.js failed to load");
+}
+
 const state = {
   data: null,
   records: [],
@@ -263,7 +268,12 @@ function renderSotas() {
   renderIndependentRanking(els.baseRankingBody, rankings.best_base_model || []);
   renderIndependentRanking(els.sizeRankingBody, rankings.lowest_file_size || []);
 
-  initSotaChart(sotas);
+  const bpbRows = Array.isArray(rankings.best_bpb) ? rankings.best_bpb : [];
+  initSotaChart(bpbRows);
+  if (!sotas.length) {
+    els.sotaCards.innerHTML = '<p class="empty-note">No submission standings in this index.</p>';
+    els.sotaTableBody.innerHTML = '<tr><td colspan="5" class="empty-cell">No submission standings in this index.</td></tr>';
+  }
 }
 
 function renderIndependentRanking(target, rows) {
@@ -274,7 +284,7 @@ function renderIndependentRanking(target, rows) {
   }
 
   target.innerHTML = rows
-    .slice(0, 10)
+    .slice(0, 25)
     .map((row, index) => {
       const value = formatConsiderationValue(row);
       return `
@@ -293,11 +303,15 @@ function initSotaChart(sotas) {
   if (!window.echarts || !els.sotaChart) return;
   const rows = sotas.filter((item) => Number.isFinite(item.value));
   const chart = getChart("sotaChart", els.sotaChart);
+  if (!rows.length) {
+    chart.clear();
+    return;
+  }
   chart.setOption(
     {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-      grid: { left: 110, right: 30, top: 20, bottom: 22 },
+      grid: { left: 168, right: 36, top: 20, bottom: 22 },
       xAxis: {
         type: "value",
         axisLabel: { color: "#9fb0ba" },
@@ -305,8 +319,9 @@ function initSotaChart(sotas) {
       },
       yAxis: {
         type: "category",
-        data: rows.map((item) => item.label || item.category),
-        axisLabel: { color: "#d7e2e8" },
+        inverse: true,
+        data: rows.map((item) => item.run_tag || item.label || item.category),
+        axisLabel: { color: "#d7e2e8", width: 140, overflow: "truncate" },
       },
       series: [
         {
@@ -398,8 +413,10 @@ function initStatusChart(charts) {
           radius: ["36%", "68%"],
           center: ["50%", "42%"],
           label: { color: "#d7e2e8", formatter: "{b}: {c}" },
-          data: statusRows,
-          color: ["#90efb6", "#ffb066", "#ff7f74", "#9ca8b5"],
+          data: statusRows.map((row) => ({
+            ...row,
+            itemStyle: { color: HubView.statusColor(row.name) },
+          })),
           itemStyle: { borderColor: "rgba(9,13,18,0.9)", borderWidth: 2 },
         },
       ],
@@ -502,31 +519,8 @@ function applyFilters() {
   const metric = els.metricSelect.value;
   const direction = els.sortDir.value;
 
-  const filtered = state.records.filter((record) => {
-    if (category !== "all" && record.category !== category) return false;
-    if (status !== "all" && record.status !== status) return false;
-    if (!query) return true;
-
-    const haystack = [
-      record.path,
-      record.rel_path,
-      record.category,
-      record.experiment_group,
-      record.run_tag,
-      record.timestamp_hint,
-      record.snippet,
-      ...(record.notes || []),
-      ...(record.keywords || []),
-      ...Object.entries(record.metrics || {}).map(([key, value]) => `${key} ${value}`),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-
-    return haystack.includes(query);
-  });
-
-  const sorted = [...filtered].sort((a, b) => compareRecords(a, b, metric, direction));
+  const filtered = HubView.filterRecords(state.records, { query, category, status });
+  const sorted = HubView.sortRecords(filtered, metric, direction);
   state.filtered = sorted;
 
   updateVisibleStats(sorted, { query, category, status, metric, direction });
@@ -561,23 +555,7 @@ function updateVisibleStats(records, filters) {
 }
 
 function compareRecords(a, b, metric, direction) {
-  const factor = direction === "asc" ? 1 : -1;
-  if (metric) {
-    const av = numericMetric(a, metric);
-    const bv = numericMetric(b, metric);
-    if (av !== bv) {
-      if (Number.isFinite(av) && Number.isFinite(bv)) return (av - bv) * factor;
-      if (Number.isFinite(av)) return -1 * factor;
-      if (Number.isFinite(bv)) return 1 * factor;
-    }
-  }
-
-  const at = a.timestamp_hint || "";
-  const bt = b.timestamp_hint || "";
-  if (at !== bt) {
-    return at.localeCompare(bt) * -1;
-  }
-  return (a.path || "").localeCompare(b.path || "");
+  return HubView.compareRecords(a, b, metric, direction);
 }
 
 function renderTable(records, metric) {
@@ -590,12 +568,12 @@ function renderTable(records, metric) {
     .map((record) => {
       const status = record.status || "unknown";
       return `
-        <tr class="record-row status-${escapeHtml(status)}" data-id="${escapeHtml(record.id)}">
+        <tr class="record-row status-${escapeHtml(status)}" data-id="${escapeHtml(record.id)}" tabindex="0" role="button" aria-pressed="false">
           <td><span class="status-pill status-${escapeHtml(status)}">${escapeHtml(status)}</span></td>
           <td>
             <div class="record-main">
               <span class="record-title">${escapeHtml(record.run_tag || record.category || "record")}</span>
-              <span class="record-sub">${escapeHtml(record.category || "unknown")}</span>
+              <span class="record-sub">${escapeHtml([record.category || "unknown", record.author].filter(Boolean).join(" · "))}</span>
             </div>
           </td>
           <td>
@@ -612,9 +590,16 @@ function renderTable(records, metric) {
     .join("");
 
   els.recordsBody.querySelectorAll(".record-row").forEach((row) => {
-    row.addEventListener("click", () => {
+    const open = () => {
       const found = state.filtered.find((record) => record.id === row.dataset.id);
       if (found) setDetail(found);
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
     });
   });
 
@@ -623,13 +608,13 @@ function renderTable(records, metric) {
 
 function formatMetricCell(record, metric) {
   if (metric && Number.isFinite(numericMetric(record, metric))) {
-    return `<span class="metric-pill">${escapeHtml(metricLabels[metric] || metric)} ${escapeHtml(formatNumber(numericMetric(record, metric)))}</span>`;
+    return `<span class="metric-pill">${escapeHtml(metricLabels[metric] || metric)} ${escapeHtml(formatMetricValue(metric, numericMetric(record, metric)))}</span>`;
   }
 
   const pairs = metricOrder
     .filter((key) => Number.isFinite(numericMetric(record, key)))
     .slice(0, 2)
-    .map((key) => `${metricLabels[key] || key}: ${formatNumber(numericMetric(record, key))}`);
+    .map((key) => `${metricLabels[key] || key}: ${formatMetricValue(key, numericMetric(record, key))}`);
 
   return pairs.length ? escapeHtml(pairs.join(" | ")) : "-";
 }
@@ -663,12 +648,14 @@ function setDetail(record) {
   els.copyPathBtn.dataset.path = record.path || record.rel_path || "";
 
   const metaRows = [
+    ["Track", record.track],
     ["Category", record.category],
+    ["Author", record.author],
     ["Experiment group", record.experiment_group],
     ["Run tag", record.run_tag],
     ["Timestamp hint", record.timestamp_hint],
     ["Status", status],
-    ["Absolute path", record.path],
+    ["Path", record.rel_path || record.path],
   ];
 
   els.detailMeta.innerHTML = metaRows
@@ -721,7 +708,7 @@ function renderMetricGrid(metrics) {
 
   return entries
     .sort((a, b) => sortMetricKeys(a[0], b[0]))
-    .map(([key, value]) => `<div class="metric-item"><span>${escapeHtml(metricLabels[key] || key)}</span><strong>${escapeHtml(formatNumber(value))}</strong></div>`)
+    .map(([key, value]) => `<div class="metric-item"><span>${escapeHtml(metricLabels[key] || key)}</span><strong>${escapeHtml(formatMetricValue(key, value))}</strong></div>`)
     .join("");
 }
 
@@ -741,25 +728,22 @@ function updateBestMetricCard(metric, records) {
     return;
   }
 
-  const ranked = records
-    .map((record) => ({ record, value: numericMetric(record, metric) }))
-    .filter((item) => Number.isFinite(item.value))
-    .sort((a, b) => a.value - b.value);
-
-  if (!ranked.length) {
+  const best = HubView.bestInView(records, metric);
+  if (!best) {
     els.bestMetricValue.textContent = "-";
     els.bestMetricLabel.textContent = `No ${metric} values in the current slice.`;
     return;
   }
 
-  const best = ranked[0];
-  els.bestMetricValue.textContent = formatNumber(best.value);
-  els.bestMetricLabel.textContent = `${metricLabels[metric] || metric} lead: ${best.record.run_tag || best.record.rel_path || best.record.path}`;
+  els.bestMetricValue.textContent = formatMetricValue(metric, best.value);
+  els.bestMetricLabel.textContent = `Lowest ${metricLabels[metric] || metric}: ${best.record.run_tag || best.record.rel_path || best.record.path}`;
 }
 
 function highlightSelected() {
   document.querySelectorAll(".record-row").forEach((row) => {
-    row.classList.toggle("selected", row.dataset.id === state.selectedId);
+    const selected = row.dataset.id === state.selectedId;
+    row.classList.toggle("selected", selected);
+    row.setAttribute("aria-pressed", selected ? "true" : "false");
   });
 }
 
@@ -775,49 +759,50 @@ function resetFilters() {
 async function copySelectedPath() {
   const path = els.copyPathBtn.dataset.path || "";
   if (!path) return;
+  const original = els.copyPathBtn.textContent;
   try {
-    await navigator.clipboard.writeText(path);
-    const original = els.copyPathBtn.textContent;
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(path);
+    } else {
+      const area = document.createElement("textarea");
+      area.value = path;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      const copied = document.execCommand("copy");
+      area.remove();
+      if (!copied) throw new Error("copy failed");
+    }
     els.copyPathBtn.textContent = "Copied";
-    setTimeout(() => {
-      els.copyPathBtn.textContent = original;
-    }, 1200);
   } catch (error) {
     console.error(error);
+    els.copyPathBtn.textContent = "Copy failed";
   }
+  setTimeout(() => {
+    els.copyPathBtn.textContent = original;
+  }, 1200);
 }
 
 function numericMetric(record, metric) {
-  const value = record?.metrics?.[metric];
-  return typeof value === "number" ? value : Number.NaN;
+  return HubView.numericMetric(record, metric);
 }
 
 function formatNumber(value) {
-  if (!Number.isFinite(value)) return "-";
-  if (Math.abs(value) >= 100) return value.toFixed(2);
-  if (Math.abs(value) >= 10) return value.toFixed(3);
-  return value.toFixed(4);
+  return HubView.formatNumber(value);
 }
 
 function formatBytes(value) {
-  if (!Number.isFinite(value) || value <= 0) return "n/a";
-  const units = ["B", "KB", "MB", "GB"];
-  let bytes = value;
-  let idx = 0;
-  while (bytes >= 1024 && idx < units.length - 1) {
-    bytes /= 1024;
-    idx += 1;
-  }
-  return `${bytes.toFixed(idx === 0 ? 0 : 2)} ${units[idx]}`;
+  return HubView.formatBytes(value);
 }
 
 function formatConsiderationValue(item) {
-  if (!item || !Number.isFinite(item.value)) return "n/a";
-  const metricUsed = (item.metric_used || item.metric_key || "").toLowerCase();
-  if (metricUsed === "model_size_bytes" || item.category === "lowest_file_size") {
-    return formatBytes(item.value);
-  }
-  return formatNumber(item.value);
+  return HubView.formatConsiderationValue(item);
+}
+
+function formatMetricValue(key, value) {
+  return HubView.formatMetricValue(key, value);
 }
 
 function formatTimestamp(value) {
@@ -848,16 +833,11 @@ function styleInlineSignal(raw) {
 }
 
 function escapeRegex(input) {
-  return input.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+  return HubView.escapeRegex(input);
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  return HubView.escapeHtml(value);
 }
 
 function truncate(text, max) {

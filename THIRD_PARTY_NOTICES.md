@@ -1,5 +1,9 @@
 # Third-Party Notices
 
+## Apache ECharts
+
+`vendor/echarts.min.js` is Apache ECharts, licensed under the Apache License, Version 2.0. The license header is at the top of that file. Upstream: https://github.com/apache/echarts
+
 ## modded-nanogpt
 
 Parts of this repository were adapted from [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt), which is licensed under the MIT License.

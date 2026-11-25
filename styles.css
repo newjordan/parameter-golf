@@ -767,6 +767,60 @@ tbody td {
   padding: 20px;
 }
 
+.empty-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: 8px;
+  z-index: 5;
+  transform: translateY(-140%);
+  background: var(--hot);
+  color: #1a1208;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.skip-link:focus {
+  transform: none;
+}
+
+.record-row:focus-visible,
+.control-button:focus-visible,
+.control-field input:focus-visible,
+.control-field select:focus-visible,
+.skip-link:focus-visible {
+  outline: 2px solid var(--cold);
+  outline-offset: 2px;
+}
+
+.record-row.selected {
+  background: linear-gradient(90deg, rgba(255, 178, 109, 0.22), rgba(124, 227, 216, 0.12));
+  box-shadow: inset 4px 0 0 var(--hot);
+}
+
+.site-footer {
+  padding: 4px 0 28px;
+  color: var(--muted);
+}
+
+.site-footer code {
+  color: var(--cold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
 @media (max-width: 1320px) {
   .summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
