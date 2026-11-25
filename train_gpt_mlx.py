@@ -6,6 +6,63 @@ Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `t
 """
 from __future__ import annotations
 
+import sys
+
+_HELP = """\
+train_gpt_mlx.py — Apple Silicon starter for the Parameter Golf 16MB track.
+
+Configuration is entirely through environment variables. Passing any other
+argument exits before MLX is imported, so --help works on machines without MLX.
+Training itself requires Apple Silicon and the mlx package.
+
+Artifact cap: code bytes plus the int8+zlib model must stay within 16000000
+bytes (decimal 16MB).
+
+Common variables (defaults in parentheses):
+  DATA_PATH                 ./data/datasets/fineweb10B_sp1024
+  TOKENIZER_PATH            ./data/tokenizers/fineweb_1024_bpe.model
+  VOCAB_SIZE                1024
+  RUN_ID                    random uuid
+  SEED                      1337
+  TRAIN_SEQ_LEN             1024
+  TRAIN_BATCH_TOKENS        524288
+  GRAD_ACCUM_STEPS          8
+  ITERATIONS                20000
+  WARMUP_STEPS              20
+  WARMDOWN_ITERS            1200
+  MAX_WALLCLOCK_SECONDS     600  (0 disables the cap)
+  VAL_LOSS_EVERY            0    (0 validates only at the end)
+  VAL_BATCH_SIZE            524288
+  MLX_MAX_MICROBATCH_TOKENS 8192
+  MLX_EAGER_EVAL            1
+  TRAIN_LOG_EVERY           200
+  NUM_LAYERS                9
+  MODEL_DIM                 512
+  NUM_HEADS                 8
+  NUM_KV_HEADS              4
+  MLP_MULT                  2
+  OUT_DIR                   logs
+
+This script only supports tied embeddings. WORLD_SIZE is 1.
+TRAIN_BATCH_TOKENS must be divisible by GRAD_ACCUM_STEPS * TRAIN_SEQ_LEN.
+Each validation microbatch uses VAL_BATCH_SIZE / GRAD_ACCUM_STEPS tokens.
+
+Smoke example, after a small shard download:
+  RUN_ID=mlx_smoke ITERATIONS=200 TRAIN_BATCH_TOKENS=8192 \\
+  VAL_LOSS_EVERY=0 VAL_BATCH_SIZE=8192 python3 train_gpt_mlx.py
+"""
+
+if __name__ == "__main__":
+    _cli_args = sys.argv[1:]
+    if any(arg in {"-h", "--help"} for arg in _cli_args):
+        print(_HELP)
+        raise SystemExit(0)
+    if _cli_args:
+        print("train_gpt_mlx.py is configured with environment variables.", file=sys.stderr)
+        print(f"Unrecognized arguments: {' '.join(_cli_args)}", file=sys.stderr)
+        print("Run with --help to list them.", file=sys.stderr)
+        raise SystemExit(2)
+
 import glob
 import json
 import math
@@ -204,7 +261,7 @@ def load_data_shard(path: Path) -> np.ndarray:
     tokens = np.fromfile(path, dtype="<u2", count=num_tokens, offset=header_bytes)
     if tokens.size != num_tokens:
         raise ValueError(f"Short read for {path}")
-    return tokens.astype(np.int32, copy=False)
+    return np.asarray(tokens, dtype=np.int32)
 
 
 # ==============================================================================
@@ -559,8 +616,18 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
+def _np_cast(values, dtype) -> np.ndarray:
+    # np.array(..., copy=False) raises on NumPy 2 when a cast is required.
+    # Copy only when the dtype actually changes.
+    array = np.asarray(values)
+    target = np.dtype(dtype)
+    if array.dtype == target:
+        return np.ascontiguousarray(array)
+    return np.ascontiguousarray(array.astype(target, copy=True))
+
+
 def _np_float32(arr: mx.array) -> np.ndarray:
-    return np.array(arr.astype(mx.float32), dtype=np.float32, copy=False)
+    return _np_cast(np.array(arr.astype(mx.float32)), np.float32)
 
 
 def keep_float_array(name: str, arr: mx.array, passthrough_orig_dtypes: dict[str, str]) -> np.ndarray:
@@ -568,7 +635,7 @@ def keep_float_array(name: str, arr: mx.array, passthrough_orig_dtypes: dict[str
         return np.ascontiguousarray(_np_float32(arr))
     if arr.dtype in {mx.float32, mx.bfloat16}:
         passthrough_orig_dtypes[name] = str(arr.dtype).split(".")[-1]
-        return np.ascontiguousarray(np.array(arr.astype(mx.float16), dtype=INT8_KEEP_FLOAT_STORE_DTYPE, copy=False))
+        return _np_cast(np.array(arr.astype(mx.float16)), INT8_KEEP_FLOAT_STORE_DTYPE)
     return np.ascontiguousarray(np.array(arr, copy=True))
 
 
@@ -579,14 +646,14 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
         # ranges much better than a single tensor-wide scale.
         clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
         clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
-        scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
-        q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
-        return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
+        scale = _np_cast(np.maximum(clip_abs / 127.0, 1.0 / 127.0), np.float32)
+        q = _np_cast(np.clip(np.round(clipped / scale[:, None]), -127, 127), np.int8)
+        return q, _np_cast(scale, INT8_PER_ROW_SCALE_DTYPE)
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
     scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
-    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    q = _np_cast(np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127), np.int8)
     return np.ascontiguousarray(q), scale
 
 
@@ -799,9 +866,8 @@ def eval_val(
         prev_ids = x_np.reshape(-1)
         tgt_ids = y_np.reshape(-1)
         bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-        bytes_np += (
-            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
-        ).astype(np.int16, copy=False)
+        space_adjust = has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        bytes_np += _np_cast(space_adjust, np.int16)
         total_tokens += chunk_token_count
         total_bytes += float(bytes_np.astype(np.float64).sum())
         if log_fn is not None and total_batches > 1 and (
@@ -838,6 +904,13 @@ def main() -> None:
     # TOKENIZER + VALIDATION METRIC SETUP
     # ==============================================================================
     args = Hyperparameters()
+    token_divisor = args.grad_accum_steps * args.train_seq_len
+    if min(args.train_batch_tokens, args.grad_accum_steps, args.train_seq_len) <= 0 or args.train_batch_tokens % token_divisor != 0:
+        raise ValueError(
+            "TRAIN_BATCH_TOKENS must be divisible by WORLD_SIZE * grad_accum_steps * TRAIN_SEQ_LEN "
+            f"(got TRAIN_BATCH_TOKENS={args.train_batch_tokens}, WORLD_SIZE=1, "
+            f"grad_accum_steps={args.grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len})"
+        )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     logfile = out_dir / f"{args.run_id}.txt"
@@ -916,6 +989,11 @@ def main() -> None:
 
     # Print config once so logs are self-describing.
     n_params = sum(int(np.prod(p.shape)) for _, p in tree_flatten(model.parameters()))
+    log(
+        f"config run_id={args.run_id} world_size=1 grad_accum_steps={args.grad_accum_steps} "
+        f"seq_len={args.train_seq_len} batch_tokens={args.train_batch_tokens} iterations={args.iterations} "
+        f"wallclock_s={args.max_wallclock_seconds:g} vocab={args.vocab_size}"
+    )
     log(f"run_id:{args.run_id}")
     log(f"mlx_version:{mx.__version__}")
     log(f"train_loader:shards pattern={args.train_files}")

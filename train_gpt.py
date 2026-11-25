@@ -6,6 +6,60 @@ Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `t
 
 from __future__ import annotations
 
+import sys
+
+_HELP = """\
+train_gpt.py — CUDA starter for the Parameter Golf 16MB / 10 minute track.
+
+Configuration is entirely through environment variables. Passing any other
+argument exits before training. This process requires an NVIDIA GPU with CUDA.
+
+Artifact cap: code bytes plus the int8+zlib model must stay within 16000000
+bytes (decimal 16MB). The script prints both sizes after training.
+
+Common variables (defaults in parentheses):
+  DATA_PATH                 ./data/datasets/fineweb10B_sp1024
+  TOKENIZER_PATH            ./data/tokenizers/fineweb_1024_bpe.model
+  VOCAB_SIZE                1024
+  RUN_ID                    random uuid
+  SEED                      1337
+  TRAIN_SEQ_LEN             1024
+  TRAIN_BATCH_TOKENS        524288
+  ITERATIONS                20000
+  WARMUP_STEPS              20
+  WARMDOWN_ITERS            1200
+  MAX_WALLCLOCK_SECONDS     600  (0 disables the cap)
+  VAL_LOSS_EVERY            1000 (0 validates only at the end)
+  VAL_BATCH_SIZE            524288
+  TRAIN_LOG_EVERY           200
+  NUM_LAYERS                9
+  MODEL_DIM                 512
+  NUM_HEADS                 8
+  NUM_KV_HEADS              4
+  MLP_MULT                  2
+  TIE_EMBEDDINGS            1
+
+WORLD_SIZE comes from torchrun and must be 1, 2, 4, or 8. Grad accumulation
+is 8 / WORLD_SIZE. TRAIN_BATCH_TOKENS must be divisible by
+WORLD_SIZE * grad_accum_steps * TRAIN_SEQ_LEN.
+
+Example:
+  RUN_ID=baseline_sp1024 DATA_PATH=./data/datasets/fineweb10B_sp1024 \\
+  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model VOCAB_SIZE=1024 \\
+  torchrun --standalone --nproc_per_node=1 train_gpt.py
+"""
+
+if __name__ == "__main__":
+    _cli_args = sys.argv[1:]
+    if any(arg in {"-h", "--help"} for arg in _cli_args):
+        print(_HELP)
+        raise SystemExit(0)
+    if _cli_args:
+        print("train_gpt.py is configured with environment variables.", file=sys.stderr)
+        print(f"Unrecognized arguments: {' '.join(_cli_args)}", file=sys.stderr)
+        print("Run with --help to list them.", file=sys.stderr)
+        raise SystemExit(2)
+
 import copy
 import glob
 import io
@@ -743,11 +797,16 @@ def main() -> None:
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    if world_size <= 0:
-        raise ValueError(f"WORLD_SIZE must be positive, got {world_size}")
-    if 8 % world_size != 0:
-        raise ValueError(f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral")
+    if world_size not in {1, 2, 4, 8}:
+        raise ValueError(f"WORLD_SIZE={world_size} must be one of 1, 2, 4, 8 so grad_accum_steps stays integral")
     grad_accum_steps = 8 // world_size
+    token_divisor = world_size * grad_accum_steps * args.train_seq_len
+    if min(args.train_batch_tokens, args.train_seq_len, grad_accum_steps) <= 0 or args.train_batch_tokens % token_divisor != 0:
+        raise ValueError(
+            "TRAIN_BATCH_TOKENS must be divisible by WORLD_SIZE * grad_accum_steps * TRAIN_SEQ_LEN "
+            f"(got TRAIN_BATCH_TOKENS={args.train_batch_tokens}, WORLD_SIZE={world_size}, "
+            f"grad_accum_steps={grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len})"
+        )
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -893,6 +952,11 @@ def main() -> None:
         optimizers.insert(1, optimizer_head)
 
     n_params = sum(p.numel() for p in base_model.parameters())
+    log0(
+        f"config run_id={args.run_id} world_size={world_size} grad_accum_steps={grad_accum_steps} "
+        f"seq_len={args.train_seq_len} batch_tokens={args.train_batch_tokens} iterations={args.iterations} "
+        f"wallclock_s={args.max_wallclock_seconds:g} vocab={args.vocab_size}"
+    )
     log0(f"model_params:{n_params}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False")

@@ -7,5 +7,13 @@ data/datasets
 data/manifest.json
 data/docs_selected.jsonl
 .mypy_cache/
+.pytest_cache/
+*.egg-info/
 .venv
 logs/
+node_modules/
+final_model.pt
+final_model.int8.ptz
+*.ptz
+.env
+*.env

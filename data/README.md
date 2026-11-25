@@ -18,7 +18,7 @@ python3 data/cached_challenge_fineweb.py --variant sp1024
 ```
 
 This populates `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/`.
-By default it downloads the full validation split and 8B training tokens (80 train shards).
+By default it downloads the full validation split and 8B training tokens (80 train shards of 100,000,000 tokens). Pass `--train-shards 1` for a one-shard smoke download. Do not pass a positional shard count and `--train-shards` together. Blank lines in a docs JSONL file are skipped.
 
 To fetch more training shards, pass `--train-shards`:
 

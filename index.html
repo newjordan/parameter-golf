@@ -4,10 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Parameter Golf Research Hub // Darklab</title>
+  <title>Parameter Golf Research Hub</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#records">Skip to records</a>
   <div class="bg-noise"></div>
   <div class="bg-grid"></div>
   <div class="bg-glow bg-glow-a"></div>
@@ -15,9 +16,9 @@
 
   <header class="shell masthead">
     <section class="hero-panel panel">
-      <p class="eyebrow">Parameter Golf // Darklab Control</p>
+      <p class="eyebrow">Parameter Golf // Checked-in records</p>
       <h1>Research Hub</h1>
-      <p class="lede">Analysis-first surface for extracting best-known values, ablation signals, failure modes, and next experiments without wading through raw logs.</p>
+      <p class="lede">Ranks every <code>submission.json</code> under <code>records/</code> by bits per byte and decimal artifact size, then opens the log or writeup behind the number. File sizes use decimal units: 1 MB is 1,000,000 bytes, and the cap is 16,000,000 bytes.</p>
       <div class="hero-meta">
         <div class="meta-chip">
           <span>Scope</span>
@@ -37,9 +38,9 @@
     <section class="mission-panel panel">
       <p class="panel-kicker">Mission</p>
       <ul class="mission-list">
-        <li>Surface personal SOTAs by metric immediately.</li>
-        <li>Keep the current hypothesis visible above the evidence table.</li>
-        <li>Turn noisy logs into readable writeups with highlighted critical numbers.</li>
+        <li>Show the leading 10-minute submission, the smallest artifact, and the delta versus Naive Baseline.</li>
+        <li>Keep that read above the evidence table.</li>
+        <li>Search logs by path, author, metric, or failure keyword.</li>
       </ul>
     </section>
   </header>
@@ -54,17 +55,17 @@
       <article class="panel stat-card ok-card">
         <span class="stat-label">Stable signal</span>
         <strong id="statOk">0</strong>
-        <small>Metric-bearing records without a detected failure.</small>
+        <small>Submissions with val_bpb and an artifact at or under the 16,000,000 byte cap.</small>
       </article>
       <article class="panel stat-card warn-card">
         <span class="stat-label">Watchlist</span>
         <strong id="statWarn">0</strong>
-        <small>Proxy lanes, promotion notes, and fragile wins.</small>
+        <small>Submissions missing a byte count or over the cap, and logs that also report val_bpb.</small>
       </article>
       <article class="panel stat-card error-card">
         <span class="stat-label">Failures</span>
         <strong id="statError">0</strong>
-        <small>Tracebacks, OOMs, shard mismatches, and broken runs.</small>
+        <small>Submissions with no val_bpb, and logs with a traceback, OOM, or shard mismatch.</small>
       </article>
       <article class="panel stat-card metric-card">
         <span class="stat-label">Best visible metric</span>
@@ -73,20 +74,20 @@
       </article>
     </section>
 
-    <section class="panel sota-panel" aria-label="Personal SOTAs by category">
+    <section class="panel sota-panel" aria-label="Submission standings">
       <div class="section-head">
         <div>
           <p class="panel-kicker">Front Page Signal</p>
-          <h2>Personal SOTAs by Category</h2>
+          <h2>Submission Standings</h2>
         </div>
-        <p class="section-meta">Best-known values per metric with current owner, status, and source path.</p>
+        <p class="section-meta">Lowest reported val_bpb, the 10-minute track leader, and the smallest artifact. Paths are repo-relative.</p>
       </div>
       <div class="sota-layout">
         <div class="sota-cards" id="sotaCards"></div>
         <div class="panel inset-panel sota-chart-panel">
           <div class="inset-head">
-            <h3>SOTA Spread</h3>
-            <span>Lower is better</span>
+            <h3>Best BPB</h3>
+            <span>Lower val_bpb is better</span>
           </div>
           <div id="sotaChart" class="chart"></div>
         </div>
@@ -107,7 +108,7 @@
       </div>
       <div class="ranking-grid">
         <article class="ranking-panel">
-          <h3>Best BPB (Independent Tests)</h3>
+          <h3>Best BPB</h3>
           <div class="compact-table-wrap">
             <table class="compact-table">
               <thead>
@@ -123,7 +124,7 @@
           </div>
         </article>
         <article class="ranking-panel">
-          <h3>Best Base Model (Independent Tests)</h3>
+          <h3>10-minute Track</h3>
           <div class="compact-table-wrap">
             <table class="compact-table">
               <thead>
@@ -139,7 +140,7 @@
           </div>
         </article>
         <article class="ranking-panel">
-          <h3>Lowest File Size (Independent Tests)</h3>
+          <h3>Lowest Artifact Size</h3>
           <div class="compact-table-wrap">
             <table class="compact-table">
               <thead>
@@ -246,7 +247,7 @@
           <p class="panel-kicker">Filters</p>
           <h2>Command Deck</h2>
         </div>
-        <p id="activeQuery" class="section-meta">No active filter</p>
+        <p id="activeQuery" class="section-meta" aria-live="polite">No active filter</p>
       </div>
       <div class="control-grid">
         <label class="control-field control-search">
@@ -288,13 +289,13 @@
     </section>
 
     <section class="content-grid">
-      <section class="panel results-panel" aria-label="Indexed records">
+      <section class="panel results-panel" id="records" aria-label="Indexed records">
         <div class="section-head mini">
           <div>
             <p class="panel-kicker">Evidence</p>
             <h2>Records</h2>
           </div>
-          <p id="resultCount" class="section-meta">Loading index...</p>
+          <p id="resultCount" class="section-meta" aria-live="polite">Loading index...</p>
         </div>
         <div class="table-wrap">
           <table>
@@ -345,7 +346,11 @@
     </section>
   </main>
 
+  <footer class="shell site-footer">
+    <p>Static index of this repository's <code>records/</code> tree. Rebuild it with <code>python -m parameter_golf.build_index</code>. MIT licensed. Byte totals on the cards are decimal megabytes.</p>
+  </footer>
   <script src="./vendor/echarts.min.js"></script>
+  <script src="./hub/view_model.js" defer></script>
   <script src="./app.js" defer></script>
 </body>
 </html>

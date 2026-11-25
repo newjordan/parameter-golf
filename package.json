@@ -1,0 +1,8 @@
+{
+  "name": "parameter-golf-hub",
+  "private": true,
+  "description": "Static research hub. JavaScript tests use the Node.js built-in test runner and install nothing.",
+  "scripts": {
+    "test": "node --test tests/hub_view.test.js"
+  }
+}
